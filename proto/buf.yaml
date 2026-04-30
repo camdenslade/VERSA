@@ -1,0 +1,8 @@
+version: v2
+name: buf.build/camslade/versa
+lint:
+  use:
+    - DEFAULT
+breaking:
+  use:
+    - FILE

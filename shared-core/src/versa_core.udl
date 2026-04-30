@@ -1,0 +1,33 @@
+// UniFFI Interface Definition Language
+// Describes the public API exposed to Swift (and Kotlin).
+// Must stay in sync with ffi_uniffi.rs.
+
+namespace versa_core {
+    string reverse_string(string input);
+};
+
+[Error]
+interface FfiError {
+    Core(string msg);
+};
+
+dictionary FfiTask {
+    string  id;
+    string  content;
+    boolean is_completed;
+    i64     last_modified;
+};
+
+interface VersaCoreEngine {
+    constructor(string client_id);
+
+    [Throws=FfiError]
+    sequence<u8> apply_task(FfiTask task);
+
+    [Throws=FfiError]
+    void merge_update(sequence<u8> bytes);
+
+    sequence<u8> snapshot();
+
+    sequence<FfiTask> get_tasks();
+};

@@ -1,0 +1,28 @@
+syntax = "proto3";
+package sync;
+
+option go_package = "github.com/camslade/versa/backend/gen/sync";
+
+// SyncMessage is the only envelope the Go relay ever sees.
+// The `payload` field is a Loro-encoded binary diff — Go treats it as
+// an opaque blob and never deserializes it.  This keeps the relay
+// data-agnostic and free of schema coupling.
+message SyncMessage {
+  string client_id  = 1;  // sender's stable device UUID
+  int64  timestamp  = 2;  // epoch ms — used for ordering in the append log
+  bytes  payload    = 3;  // Loro binary diff (output of LoroDoc::export)
+  MsgType msg_type  = 4;
+}
+
+enum MsgType {
+  MSG_TYPE_UNSPECIFIED = 0;
+  MSG_TYPE_UPDATE      = 1;  // incremental diff from a client
+  MSG_TYPE_FULL_SYNC   = 2;  // full snapshot — sent on initial connect
+}
+
+// SyncAck is sent back to the originating client so it can advance
+// its local vector clock / mark the op as durably relayed.
+message SyncAck {
+  string client_id  = 1;
+  int64  server_seq = 2;  // monotonically increasing per-server counter
+}

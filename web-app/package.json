@@ -1,0 +1,24 @@
+{
+  "name": "versa-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:wasm": "cd ../shared-core && wasm-pack build --target web --features wasm --out-dir ../web-app/src/wasm/pkg",
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vite-plugin-wasm": "^3.4.0",
+    "vite-plugin-top-level-await": "^1.4.0"
+  }
+}

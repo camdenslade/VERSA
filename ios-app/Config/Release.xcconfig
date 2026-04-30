@@ -1,0 +1,4 @@
+// Release config — points at the deployed relay.
+// Replace with your actual production domain before shipping.
+RELAY_HOST = versa.cslade.space
+RELAY_PORT = 443

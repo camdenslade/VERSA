@@ -1,0 +1,67 @@
+name: Versa
+options:
+  bundleIdPrefix: com.camslade
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+configFiles:
+  Debug:   Config/Debug.xcconfig
+  Release: Config/Release.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ENABLE_PREVIEWS: YES
+    DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+    OTHER_SWIFT_FLAGS: ""
+
+targets:
+  Versa:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+        excludes:
+          - Generated/.gitkeep
+    resources: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.camslade.versa
+        PRODUCT_NAME: Versa
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"          # iPhone + iPad
+        INFOPLIST_FILE: Sources/App/Info.plist
+        # XCFramework search path — populated after running build-rust-xcframework.sh
+        FRAMEWORK_SEARCH_PATHS: "$(PROJECT_DIR)/Frameworks"
+        # Embed the XCFramework into the app bundle
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
+        # UniFFI generates a Swift file + C header; the header is bridged via this file.
+        # HEADER_SEARCH_PATHS covers both device and simulator slices at build time.
+        SWIFT_OBJC_BRIDGING_HEADER: "Sources/App/Versa-Bridging-Header.h"
+        HEADER_SEARCH_PATHS: >
+          $(PROJECT_DIR)/Frameworks/VersaCore.xcframework/ios-arm64/Headers
+          $(PROJECT_DIR)/Frameworks/VersaCore.xcframework/ios-arm64_x86_64-simulator/Headers
+    dependencies:
+      - framework: Frameworks/VersaCore.xcframework
+        embed: true
+    scheme:
+      testTargets:
+        - VersaTests
+      gatherCoverageData: true
+
+  VersaTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Versa
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.camslade.versa.tests
+        SWIFT_VERSION: "6.0"

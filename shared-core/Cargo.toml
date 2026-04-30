@@ -1,0 +1,42 @@
+[package]
+name    = "versa-core"
+version = "0.1.0"
+edition = "2021"
+
+# cdylib  → required by both wasm-bindgen and UniFFI (native .so/.dylib)
+# staticlib → required for iOS XCFramework linking
+[lib]
+name       = "versa_core"
+crate-type = ["cdylib", "staticlib"]
+
+# ── Shared (always compiled) ──────────────────────────────────────────────────
+[dependencies]
+loro      = "1"
+thiserror = "1"
+uuid      = { version = "1", features = ["v4", "js"] }
+
+# ── UniFFI — Swift/Kotlin FFI (native targets only) ──────────────────────────
+# Gated on the "uniffi" feature so the WASM build doesn't pull in native C glue.
+uniffi = { version = "0.29", optional = true, features = ["cli"] }
+
+# ── wasm-bindgen — TypeScript/Web target ─────────────────────────────────────
+# Gated on the "wasm" feature so the iOS build never sees JS runtime symbols.
+wasm-bindgen            = { version = "0.2", optional = true }
+js-sys                  = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+# web-sys is only needed if you call into the DOM from Rust (not required yet)
+# web-sys = { version = "0.3", optional = true, features = ["console"] }
+
+[features]
+default = []
+uniffi  = ["dep:uniffi"]
+wasm    = ["dep:wasm-bindgen", "dep:js-sys", "dep:console_error_panic_hook"]
+
+# The bindgen binary — `cargo run --bin uniffi-bindgen` uses this.
+[[bin]]
+name              = "uniffi-bindgen"
+required-features = ["uniffi"]
+
+[build-dependencies]
+# uniffi's build helper is always available; it no-ops when the feature is off
+uniffi = { version = "0.29", features = ["build"], optional = true }

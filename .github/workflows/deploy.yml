@@ -1,0 +1,77 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::390402548152:role/kimbu-github-actions
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker buildx create --use
+          docker buildx build \
+            --platform linux/amd64 \
+            --cache-from type=registry,ref=$ECR_REGISTRY/versa-relay:cache \
+            --cache-to type=registry,ref=$ECR_REGISTRY/versa-relay:cache,mode=max \
+            -t $ECR_REGISTRY/versa-relay:$IMAGE_TAG \
+            -t $ECR_REGISTRY/versa-relay:latest \
+            --push \
+            .
+
+      - name: Deploy to ECS
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition versa-relay \
+            --query 'taskDefinition' \
+            --output json | \
+            python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for k in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
+              d.pop(k, None)
+          for c in d['containerDefinitions']:
+              c['image'] = '$ECR_REGISTRY/versa-relay:$IMAGE_TAG'
+          print(json.dumps(d))
+          ")
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          aws ecs update-service \
+            --cluster kimbu \
+            --service versa-relay \
+            --task-definition $NEW_ARN \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster kimbu \
+            --services versa-relay

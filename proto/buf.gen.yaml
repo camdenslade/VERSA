@@ -1,0 +1,14 @@
+version: v2
+plugins:
+  # Go + Connect-RPC
+  - remote: buf.build/protocolbuffers/go
+    out: ../backend/gen
+    opt: paths=source_relative
+  - remote: buf.build/connectrpc/go
+    out: ../backend/gen
+    opt: paths=source_relative
+
+  # Swift
+  - remote: buf.build/apple/swift
+    out: ../ios-app/Sources/Generated
+    opt: Visibility=Public
