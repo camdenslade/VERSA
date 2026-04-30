@@ -1,57 +1,108 @@
-// Package relay implements the WebSocket sync relay.
-// It is intentionally stateless: it receives a SyncUpdate from one client
-// and fans it out to every other connected client.  The Postgres store is
-// append-only — it keeps the "golden record" for clients that reconnect.
 package relay
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/nats-io/nats.go"
 )
 
-// Client represents one connected device.
+// Client represents one connected device on this relay node.
 type Client struct {
 	ID   string
-	Send chan []byte // raw protobuf bytes
+	Room string
+	Send chan []byte
 }
 
-// Hub fan-outs updates to all connected clients except the sender.
+// Hub manages local clients and bridges to NATS for cross-node fan-out.
+// Each relay node is stateless with respect to other nodes — NATS is the
+// shared backplane.
 type Hub struct {
+	nc *nats.Conn
+
 	mu      sync.RWMutex
-	clients map[string]*Client
+	clients map[string]*Client // key: clientID
+	subs    map[string]*nats.Subscription // key: room, one sub per room on this node
 }
 
-func NewHub() *Hub {
-	return &Hub{clients: make(map[string]*Client)}
-}
-
-// Register adds a client to the hub.
-func (h *Hub) Register(c *Client) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.clients[c.ID] = c
-	slog.Info("client connected", "id", c.ID, "total", len(h.clients))
-}
-
-// Unregister removes a client and closes its send channel.
-func (h *Hub) Unregister(c *Client) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, ok := h.clients[c.ID]; ok {
-		delete(h.clients, c.ID)
-		close(c.Send)
-		slog.Info("client disconnected", "id", c.ID, "total", len(h.clients))
+func NewHub(nc *nats.Conn) *Hub {
+	return &Hub{
+		nc:      nc,
+		clients: make(map[string]*Client),
+		subs:    make(map[string]*nats.Subscription),
 	}
 }
 
-// Broadcast sends raw bytes to every client except the originator.
+// Register adds a client and ensures this node is subscribed to its room.
+func (h *Hub) Register(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.clients[c.ID] = c
+	slog.Info("client connected", "id", c.ID, "room", c.Room, "total", len(h.clients))
+
+	if _, ok := h.subs[c.Room]; !ok {
+		room := c.Room
+		sub, err := h.nc.Subscribe(roomSubject(room), func(msg *nats.Msg) {
+			h.deliverToRoom(room, msg.Data)
+		})
+		if err != nil {
+			slog.Error("nats subscribe failed", "room", room, "err", err)
+			return
+		}
+		h.subs[room] = sub
+	}
+}
+
+// Unregister removes a client and cleans up the room subscription if empty.
+func (h *Hub) Unregister(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if _, ok := h.clients[c.ID]; !ok {
+		return
+	}
+	delete(h.clients, c.ID)
+	close(c.Send)
+	slog.Info("client disconnected", "id", c.ID, "room", c.Room, "total", len(h.clients))
+
+	// Unsubscribe from NATS if no local clients remain in this room.
+	roomEmpty := true
+	for _, cl := range h.clients {
+		if cl.Room == c.Room {
+			roomEmpty = false
+			break
+		}
+	}
+	if roomEmpty {
+		if sub, ok := h.subs[c.Room]; ok {
+			_ = sub.Unsubscribe()
+			delete(h.subs, c.Room)
+		}
+	}
+}
+
+// Broadcast publishes to NATS so all nodes fan-out to their local clients.
+// The full wire frame (including the sender's client_id prefix) is published
+// as-is — receivers strip it just like they do today.
 func (h *Hub) Broadcast(ctx context.Context, senderID string, data []byte) {
+	if err := h.nc.Publish(roomSubjectForClient(h, senderID), data); err != nil {
+		slog.Error("nats publish failed", "sender", senderID, "err", err)
+	}
+}
+
+// deliverToRoom fans out a NATS message to local clients in a room,
+// skipping the original sender (identified by the 4-byte prefix in the frame).
+func (h *Hub) deliverToRoom(room string, data []byte) {
+	senderID := extractSenderID(data)
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	for id, c := range h.clients {
-		if id == senderID {
+		if c.Room != room || id == senderID {
 			continue
 		}
 		select {
@@ -60,4 +111,32 @@ func (h *Hub) Broadcast(ctx context.Context, senderID string, data []byte) {
 			slog.Warn("client send buffer full, dropping update", "id", id)
 		}
 	}
+}
+
+// roomSubjectForClient looks up the sender's room and returns the subject.
+func roomSubjectForClient(h *Hub, senderID string) string {
+	h.mu.RLock()
+	c, ok := h.clients[senderID]
+	h.mu.RUnlock()
+	if ok {
+		return roomSubject(c.Room)
+	}
+	return roomSubject("default")
+}
+
+func roomSubject(room string) string {
+	return fmt.Sprintf("versa.rooms.%s", room)
+}
+
+// extractSenderID reads the client_id string from the 4-byte-prefixed wire frame.
+// Returns empty string if the frame is malformed — caller skips dedup in that case.
+func extractSenderID(data []byte) string {
+	if len(data) < 4 {
+		return ""
+	}
+	idLen := int(uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3]))
+	if 4+idLen > len(data) {
+		return ""
+	}
+	return string(data[4 : 4+idLen])
 }

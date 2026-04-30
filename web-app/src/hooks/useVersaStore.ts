@@ -15,6 +15,24 @@ interface SyncState {
 }
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "ws://localhost:8080/sync";
+const SNAPSHOT_KEY = "versa.snapshot";
+
+function saveSnapshot(engine: Awaited<ReturnType<typeof getEngine>>) {
+  try {
+    const snap = engine.snapshot() as Uint8Array;
+    const b64  = btoa(String.fromCharCode(...snap));
+    localStorage.setItem(SNAPSHOT_KEY, b64);
+  } catch { /* non-fatal */ }
+}
+
+function loadSnapshot(engine: Awaited<ReturnType<typeof getEngine>>) {
+  try {
+    const b64 = localStorage.getItem(SNAPSHOT_KEY);
+    if (!b64) return;
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    engine.merge_update(bytes);
+  } catch { /* non-fatal */ }
+}
 
 export function useVersaStore() {
   const [state, setState] = useState<SyncState>({ connected: false, tasks: [], error: null });
@@ -24,21 +42,22 @@ export function useVersaStore() {
     let cancelled = false;
 
     (async () => {
-      // Step 1: init WASM
       let engine;
       try {
         engine = await getEngine();
-        console.log("[versa] WASM engine ready");
       } catch (e) {
         console.error("[versa] WASM init failed", e);
         if (!cancelled) setState(s => ({ ...s, error: `WASM init failed: ${e}` }));
         return;
       }
 
-      // Step 2: connect WebSocket
+      // Load persisted snapshot so UI is instant on mount.
+      loadSnapshot(engine);
+      const initial = (engine.get_tasks() as WasmTask[]).map(wasmTaskToTask);
+      if (!cancelled && initial.length > 0) setState(s => ({ ...s, tasks: initial }));
+
       const clientID = localStorage.getItem("versa.client_id")!;
       const url = `${RELAY_URL}?client_id=${clientID}`;
-      console.log("[versa] connecting to", url);
 
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
@@ -46,38 +65,31 @@ export function useVersaStore() {
 
       ws.onopen = () => {
         if (cancelled) return;
-        console.log("[versa] WebSocket connected");
         setState(s => ({ ...s, connected: true, error: null }));
+        // Send full snapshot so peers get all our state immediately.
+        const snap = new Uint8Array(engine.snapshot() as ArrayBuffer);
+        if (snap.length > 0) ws.send(buildFrame(clientID, snap));
       };
 
-      ws.onerror = (e) => {
-        console.error("[versa] WebSocket error", e);
-        if (!cancelled) setState(s => ({ ...s, error: "WebSocket error — is the Go relay running?" }));
+      ws.onerror = () => {
+        if (!cancelled) setState(s => ({ ...s, error: "WebSocket error — is the relay running?" }));
       };
 
       ws.onmessage = (evt: MessageEvent<ArrayBuffer>) => {
         if (cancelled) return;
-        const data    = new Uint8Array(evt.data);
-        const idLen   = new DataView(data.buffer).getUint32(0, false);
-        console.log("[versa] frame total=", data.length, "idLen=", idLen, "first4=", Array.from(data.slice(0,4)));
-        const payload = stripHeader(data);
-        console.log("[versa] payload first8=", Array.from(payload.slice(0,8)), "len=", payload.length);
-
+        const payload = stripHeader(new Uint8Array(evt.data));
         try {
           engine.merge_update(payload);
         } catch (e) {
           console.error("[versa] merge_update failed", e);
           return;
         }
-
         const raw = engine.get_tasks() as WasmTask[];
-        console.log("[versa] get_tasks returned", raw.length, "tasks", raw);
-        console.log("[versa] doc json=", engine.get_doc_json());
+        saveSnapshot(engine);
         setState(s => ({ ...s, tasks: raw.map(wasmTaskToTask) }));
       };
 
       ws.onclose = () => {
-        console.log("[versa] WebSocket closed");
         if (!cancelled) setState(s => ({ ...s, connected: false }));
       };
     })();
@@ -93,6 +105,7 @@ export function useVersaStore() {
     const id  = crypto.randomUUID();
     const ts  = Date.now();
     const diff = new Uint8Array(engine.apply_task(id, content, false, ts) as ArrayBuffer);
+    saveSnapshot(engine);
     setState(s => ({ ...s, tasks: [...s.tasks, { id, content, isCompleted: false, lastModified: ts }] }));
     sendDiff(diff);
   }, []);
@@ -108,6 +121,7 @@ export function useVersaStore() {
         const diff = new Uint8Array(
           engine.apply_task(updated.id, updated.content, updated.isCompleted, updated.lastModified) as ArrayBuffer
         );
+        saveSnapshot(engine);
         sendDiff(diff);
       })();
       return { ...prev, tasks };
