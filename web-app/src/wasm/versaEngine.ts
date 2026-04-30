@@ -1,6 +1,6 @@
 // Manages the WASM module lifecycle.
 //
-// ── Memory pitfalls ───────────────────────────────────────────────────────────
+// Memory pitfalls:
 // 1. NEVER hold a reference to a Uint8Array returned by the WASM module across
 //    an `await` point.  The WASM heap can be moved by a subsequent allocation.
 //    Always copy: `const safe = new Uint8Array(wasm.apply_task(...))`

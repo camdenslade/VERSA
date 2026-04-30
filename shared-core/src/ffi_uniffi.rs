@@ -1,7 +1,6 @@
 // UniFFI surface — Swift / Kotlin bindings.
 // This file only compiles when --features uniffi is set (iOS / macOS builds).
 //
-// ── Ownership model ──────────────────────────────────────────────────────────
 // UniFFI wraps every `#[uniffi::Object]` in Arc<T>.  Swift holds a strong
 // reference via its generated wrapper class.  When the Swift object is
 // deinit'd, the Arc refcount drops.  You never call free() manually.
@@ -57,8 +56,6 @@ impl From<VersaError> for FfiError {
     }
 }
 
-// ── The exported object ───────────────────────────────────────────────────────
-
 #[derive(uniffi::Object)]
 pub struct VersaCoreEngine(Arc<CrdtEngine>);
 
@@ -72,6 +69,10 @@ impl VersaCoreEngine {
     /// Apply a task mutation. Returns the binary diff to forward to the relay.
     pub fn apply_task(&self, task: FfiTask) -> Result<Vec<u8>, FfiError> {
         self.0.apply_task(task.into()).map_err(Into::into)
+    }
+
+    pub fn delete_task(&self, id: String) -> Result<Vec<u8>, FfiError> {
+        self.0.delete_task(id).map_err(Into::into)
     }
 
     /// Merge a binary diff received from the relay.
@@ -90,7 +91,6 @@ impl VersaCoreEngine {
     }
 }
 
-// ── Bridge validation ─────────────────────────────────────────────────────────
 #[uniffi::export]
 pub fn reverse_string(input: String) -> String {
     input.chars().rev().collect()

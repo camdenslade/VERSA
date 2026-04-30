@@ -9,17 +9,14 @@ edition = "2021"
 name       = "versa_core"
 crate-type = ["cdylib", "staticlib"]
 
-# ── Shared (always compiled) ──────────────────────────────────────────────────
 [dependencies]
 loro      = "1"
 thiserror = "1"
 uuid      = { version = "1", features = ["v4", "js"] }
 
-# ── UniFFI — Swift/Kotlin FFI (native targets only) ──────────────────────────
 # Gated on the "uniffi" feature so the WASM build doesn't pull in native C glue.
 uniffi = { version = "0.29", optional = true, features = ["cli"] }
 
-# ── wasm-bindgen — TypeScript/Web target ─────────────────────────────────────
 # Gated on the "wasm" feature so the iOS build never sees JS runtime symbols.
 wasm-bindgen            = { version = "0.2", optional = true }
 js-sys                  = { version = "0.3", optional = true }

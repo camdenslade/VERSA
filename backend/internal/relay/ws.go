@@ -26,7 +26,6 @@ type controlMsg struct {
 
 func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// ── Auth ─────────────────────────────────────────────────────────────
 		tokenStr := r.URL.Query().Get("token")
 		if tokenStr == "" {
 			// Fallback: allow bare client_id for local dev (no validator configured)
@@ -45,10 +44,16 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 			return
 		}
 
-		clientID := claims.Subject   // Kimbu user ID
-		room     := claims.AppID    // tenant isolation
+		userID := claims.Subject
+		deviceID := claims.DeviceID
+		if deviceID == "" {
+			deviceID = userID // fallback if no device_id in token
+		}
+		room := claims.AppID
+		if room == "" || room == "00000000-0000-0000-0000-000000000000" {
+			room = userID
+		}
 
-		// ── Upgrade ──────────────────────────────────────────────────────────
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true,
 		})
@@ -57,17 +62,16 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 			return
 		}
 
-		c := &Client{ID: clientID, Room: room, Send: make(chan []byte, 128)}
+		c := &Client{ID: deviceID, Room: room, Send: make(chan []byte, 128)}
 		hub.Register(c)
 		defer hub.Unregister(c)
 
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		// ── Re-auth timer (Gap 3) ─────────────────────────────────────────────
 		// Warn the client reAuthWarningBefore the token expires so it can
 		// refresh without disconnecting. After expiry, close the connection.
-		ttl       := auth.TimeUntilExpiry(claims)
+		ttl := auth.TimeUntilExpiry(claims)
 		warnAfter := ttl - reAuthWarningBefore
 		if warnAfter < 0 {
 			warnAfter = 0
@@ -87,13 +91,12 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 			case <-ctx.Done():
 				return
 			case <-time.After(reAuthWarningBefore):
-				slog.Info("token expired, closing connection", "client", clientID)
+				slog.Info("token expired, closing connection", "client", deviceID)
 				conn.Close(websocket.StatusPolicyViolation, "token expired")
 				cancel()
 			}
 		}()
 
-		// ── Outbound pump ─────────────────────────────────────────────────────
 		go func() {
 			for {
 				select {
@@ -104,14 +107,13 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 						return
 					}
 					if err := conn.Write(ctx, websocket.MessageBinary, data); err != nil {
-						slog.Warn("ws write", "client", clientID, "err", err)
+						slog.Warn("ws write", "client", deviceID, "err", err)
 						return
 					}
 				}
 			}
 		}()
 
-		// ── Inbound loop ──────────────────────────────────────────────────────
 		currentClaims := claims
 		_ = currentClaims
 
@@ -128,17 +130,20 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 					Type  string `json:"type"`
 					Token string `json:"token"`
 				}
+				if json.Unmarshal(raw, &ctrl) == nil && ctrl.Type == "ping" {
+					continue
+				}
 				if json.Unmarshal(raw, &ctrl) == nil && ctrl.Type == "reauth" {
 					newClaims, err := validator.Validate(ctx, ctrl.Token)
 					if err != nil {
-						slog.Warn("reauth failed", "client", clientID, "err", err)
+						slog.Warn("reauth failed", "client", deviceID, "err", err)
 						conn.Close(websocket.StatusPolicyViolation, "reauth failed")
 						return
 					}
 					// Reset the expiry timer by restarting (simplest: close and let client reconnect)
 					// For now, accept the new claims and extend the session.
 					currentClaims = newClaims
-					slog.Info("reauth accepted", "client", clientID, "new_exp", newClaims.ExpiresAt)
+					slog.Info("reauth accepted", "client", deviceID, "new_exp", newClaims.ExpiresAt)
 					ack, _ := json.Marshal(controlMsg{Type: "reauth_ok"})
 					_ = conn.Write(ctx, websocket.MessageText, ack)
 				}
@@ -152,37 +157,37 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 
 			data, err := io.ReadAll(io.LimitReader(r, maxMessageBytes))
 			if err != nil {
-				slog.Warn("ws read", "client", clientID, "err", err)
+				slog.Warn("ws read", "client", deviceID, "err", err)
 				break
 			}
 
 			if len(data) < 4 {
-				slog.Warn("frame too short", "client", clientID, "len", len(data))
+				slog.Warn("frame too short", "client", deviceID, "len", len(data))
 				continue
 			}
 
-			idLen    := binary.BigEndian.Uint32(data[:4])
+			idLen := binary.BigEndian.Uint32(data[:4])
 			if int(idLen)+4 > len(data) {
-				slog.Warn("malformed frame", "client", clientID)
+				slog.Warn("malformed frame", "client", deviceID)
 				continue
 			}
 			senderID := string(data[4 : 4+idLen])
 
 			slog.Info("relaying blob",
-				"from",  senderID,
-				"room",  room,
+				"from", senderID,
+				"room", room,
 				"bytes", len(data),
 			)
 
-			hub.Broadcast(ctx, senderID, data)
+			hub.Broadcast(ctx, room, data)
 		}
 	}
 }
 
 // handleUnauthenticated handles connections without a token (local dev only).
 func handleUnauthenticated(w http.ResponseWriter, r *http.Request, hub *Hub) {
-	clientID := r.URL.Query().Get("client_id")
-	if clientID == "" {
+	deviceID := r.URL.Query().Get("client_id")
+	if deviceID == "" {
 		http.Error(w, "client_id required", http.StatusBadRequest)
 		return
 	}
@@ -197,7 +202,7 @@ func handleUnauthenticated(w http.ResponseWriter, r *http.Request, hub *Hub) {
 		return
 	}
 
-	c := &Client{ID: clientID, Room: room, Send: make(chan []byte, 128)}
+	c := &Client{ID: deviceID, Room: room, Send: make(chan []byte, 128)}
 	hub.Register(c)
 	defer hub.Unregister(c)
 
@@ -233,6 +238,6 @@ func handleUnauthenticated(w http.ResponseWriter, r *http.Request, hub *Hub) {
 		}
 		senderID := string(data[4 : 4+idLen])
 		slog.Info("relaying blob", "from", senderID, "room", room, "bytes", len(data))
-		hub.Broadcast(ctx, senderID, data)
+		hub.Broadcast(ctx, room, data)
 	}
 }

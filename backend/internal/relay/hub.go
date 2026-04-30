@@ -43,6 +43,9 @@ func (h *Hub) Register(c *Client) {
 	h.clients[c.ID] = c
 	slog.Info("client connected", "id", c.ID, "room", c.Room, "total", len(h.clients))
 
+	if h.nc == nil || c.Room == "" {
+		return // local-only mode or empty room — rely on local broadcast
+	}
 	if _, ok := h.subs[c.Room]; !ok {
 		room := c.Room
 		sub, err := h.nc.Subscribe(roomSubject(room), func(msg *nats.Msg) {
@@ -84,13 +87,17 @@ func (h *Hub) Unregister(c *Client) {
 	}
 }
 
-// Broadcast publishes to NATS so all nodes fan-out to their local clients.
-// The full wire frame (including the sender's client_id prefix) is published
-// as-is — receivers strip it just like they do today.
-func (h *Hub) Broadcast(ctx context.Context, senderID string, data []byte) {
-	if err := h.nc.Publish(roomSubjectForClient(h, senderID), data); err != nil {
-		slog.Error("nats publish failed", "sender", senderID, "err", err)
+// Broadcast delivers data to all clients in the given room.
+// room is passed directly from ws.go (derived from JWT claims), so it's always correct.
+func (h *Hub) Broadcast(ctx context.Context, room string, data []byte) {
+	if h.nc != nil && room != "" {
+		if err := h.nc.Publish(roomSubject(room), data); err != nil {
+			slog.Error("nats publish failed", "room", room, "err", err)
+			h.deliverToRoom(room, data)
+		}
+		return
 	}
+	h.deliverToRoom(room, data)
 }
 
 // deliverToRoom fans out a NATS message to local clients in a room,
@@ -111,17 +118,6 @@ func (h *Hub) deliverToRoom(room string, data []byte) {
 			slog.Warn("client send buffer full, dropping update", "id", id)
 		}
 	}
-}
-
-// roomSubjectForClient looks up the sender's room and returns the subject.
-func roomSubjectForClient(h *Hub, senderID string) string {
-	h.mu.RLock()
-	c, ok := h.clients[senderID]
-	h.mu.RUnlock()
-	if ok {
-		return roomSubject(c.Room)
-	}
-	return roomSubject("default")
 }
 
 func roomSubject(room string) string {

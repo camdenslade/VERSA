@@ -84,6 +84,7 @@ func TimeUntilExpiry(claims *Claims) time.Duration {
 }
 
 // rsaKey returns the RSA public key for a given kid, refreshing the JWKS if needed.
+// If kid is empty, returns the only key in the JWKS (single-key issuers omit kid).
 func (v *Validator) rsaKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	v.mu.RLock()
 	key, ok := v.rsaKeys[kid]
@@ -103,12 +104,17 @@ func (v *Validator) rsaKey(ctx context.Context, kid string) (*rsa.PublicKey, err
 	}
 
 	v.mu.RLock()
-	key, ok = v.rsaKeys[kid]
-	v.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("kid %q not found in JWKS", kid)
+	defer v.mu.RUnlock()
+	if key, ok = v.rsaKeys[kid]; ok {
+		return key, nil
 	}
-	return key, nil
+	// kid absent or not matched — use the sole key if there is exactly one.
+	if kid == "" && len(v.rsaKeys) == 1 {
+		for _, k := range v.rsaKeys {
+			return k, nil
+		}
+	}
+	return nil, fmt.Errorf("kid %q not found in JWKS", kid)
 }
 
 type jwksResponse struct {

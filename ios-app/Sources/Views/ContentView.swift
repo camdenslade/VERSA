@@ -2,34 +2,18 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(TaskEngine.self) private var engine
-    @State private var newTaskText = ""
-    @State private var ffiResult   = ""
 
     var body: some View {
         NavigationStack {
             List {
-                // FFI bridge test row
-                Section("FFI Bridge Test") {
-                    HStack {
-                        TextField("Type something…", text: $newTaskText)
-                        Button("Reverse") {
-                            ffiResult = engine.reversedString(newTaskText)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    if !ffiResult.isEmpty {
-                        Text(ffiResult)
-                            .foregroundStyle(.secondary)
-                            .font(.caption)
+                ForEach(engine.tasks) { task in
+                    TaskRow(task: task) {
+                        engine.toggleTask(task.id)
                     }
                 }
-
-                // Task list
-                Section("Tasks") {
-                    ForEach(engine.tasks) { task in
-                        TaskRow(task: task) {
-                            engine.toggleTask(task.id)
-                        }
+                .onDelete { offsets in
+                    for i in offsets {
+                        engine.deleteTask(engine.tasks[i].id)
                     }
                 }
             }
@@ -38,6 +22,16 @@ struct ContentView: View {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Add", systemImage: "plus") {
                         engine.addTask(content: "New task \(engine.tasks.count + 1)")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(engine.syncState == .connected ? Color.green : Color.secondary)
+                            .frame(width: 8, height: 8)
+                        Text(engine.syncState == .connected ? "Live" : "Offline")
+                            .font(.footnote)
+                            .foregroundStyle(engine.syncState == .connected ? .primary : .secondary)
                     }
                 }
             }

@@ -17,7 +17,9 @@ final class TaskEngine {
         let relayURL = relayURL ?? TaskEngine.relayURL()
         let clientID = Self.stableClientID()
         crdt      = VersaCoreEngine(clientId: clientID)
-        transport = RelayTransport(url: relayURL, clientID: clientID)
+        transport = RelayTransport(url: relayURL, clientID: clientID) {
+            try await KimbuAuth.shared.token()
+        }
 
         // Load persisted snapshot before connecting so UI is instant on launch.
         if let saved = Self.loadSnapshot() {
@@ -51,6 +53,21 @@ final class TaskEngine {
         tasks[idx].isCompleted.toggle()
         tasks[idx].lastModified = Date().millisecondsSince1970
         sendToRust(tasks[idx])
+    }
+
+    func deleteTask(_ id: String) {
+        tasks.removeAll { $0.id == id }
+        let crdtRef   = crdt
+        let transport = transport
+        Task.detached(priority: .userInitiated) {
+            do {
+                let diff: Data = try crdtRef.deleteTask(id: id)
+                Self.persistSnapshot(crdtRef.snapshot())
+                await transport.send(diff)
+            } catch {
+                print("[VersaCore] delete_task failed: \(error)")
+            }
+        }
     }
 
     // MARK: - Private
@@ -91,11 +108,13 @@ final class TaskEngine {
 
             case .message(let data):
                 let payload = stripHeader(data)
+                print("[VersaCore] recv \(data.count) bytes, payload \(payload.count) bytes")
                 let crdtRef = crdt
                 let result: [AppTask]? = await Task.detached(priority: .userInitiated) {
                     do {
                         try crdtRef.mergeUpdate(bytes: payload)
                         let tasks = crdtRef.getTasks().map(AppTask.init)
+                        print("[VersaCore] after merge: \(tasks.count) tasks")
                         Self.persistSnapshot(crdtRef.snapshot())
                         return tasks
                     } catch {
@@ -109,19 +128,23 @@ final class TaskEngine {
 
             case .disconnected:
                 syncState = .disconnected
+                // On disconnect, invalidate cached token so the next openSocket()
+                // call forces a fresh login. This handles 401 / expired tokens
+                // transparently — RelayTransport will reconnect automatically.
+                await KimbuAuth.shared.invalidate()
             }
         }
     }
 
     // MARK: - Persistence
 
-    private static var snapshotURL: URL {
+    nonisolated private static var snapshotURL: URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("versa.snapshot")
     }
 
-    private static func persistSnapshot(_ data: Data) {
+    nonisolated private static func persistSnapshot(_ data: Data) {
         try? FileManager.default.createDirectory(
             at: snapshotURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -129,7 +152,7 @@ final class TaskEngine {
         try? data.write(to: snapshotURL, options: .atomic)
     }
 
-    private static func loadSnapshot() -> Data? {
+    nonisolated private static func loadSnapshot() -> Data? {
         try? Data(contentsOf: snapshotURL)
     }
 

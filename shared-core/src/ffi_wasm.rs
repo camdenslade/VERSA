@@ -1,7 +1,6 @@
 // wasm-bindgen surface — TypeScript / Web bindings.
 // This file only compiles when --features wasm is set (wasm32 target).
 //
-// ── Memory model ─────────────────────────────────────────────────────────────
 // Wasm linear memory is a flat ArrayBuffer shared between JS and Wasm.
 // wasm-bindgen copies Vec<u8> → JS Uint8Array on every boundary crossing.
 //
@@ -22,7 +21,6 @@ use wasm_bindgen::prelude::*;
 use crate::engine::CrdtEngine;
 use crate::types::Task;
 
-// ── JS-visible Task ───────────────────────────────────────────────────────────
 // We use a plain object shape so TypeScript gets a clean interface without
 // having to call into Wasm for property reads.
 
@@ -45,7 +43,6 @@ impl From<Task> for WasmTask {
     }
 }
 
-// ── Exported engine ───────────────────────────────────────────────────────────
 #[wasm_bindgen]
 pub struct VersaEngine {
     inner: CrdtEngine,
@@ -83,6 +80,13 @@ impl VersaEngine {
         };
         self.inner
             .apply_task(task)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen]
+    pub fn delete_task(&self, id: String) -> Result<Vec<u8>, JsValue> {
+        self.inner
+            .delete_task(id)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
