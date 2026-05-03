@@ -1,26 +1,37 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getEngine, type WasmTask } from "../wasm/versaEngine";
+import { getEngine, type WasmTask, type WasmList } from "../wasm/versaEngine";
 import { type KimbuSession } from "./useKimbuAuth";
 
 export interface Task {
   id:           string;
+  listId:       string;
   content:      string;
   isCompleted:  boolean;
+  position:     number;
+  lastModified: number;
+}
+
+export interface List {
+  id:           string;
+  name:         string;
   lastModified: number;
 }
 
 interface SyncState {
   connected: boolean;
   tasks:     Task[];
+  lists:     List[];
   error:     string | null;
 }
 
 const RELAY_URL    = import.meta.env.VITE_RELAY_URL ?? "ws://localhost:8080/sync";
 const SNAPSHOT_KEY = "versa.snapshot";
+const QUEUE_KEY    = "versa.offline_queue";
+const DEBOUNCE_MS  = 300;
 
 function saveSnapshot(engine: Awaited<ReturnType<typeof getEngine>>) {
   try {
-    const snap = engine.snapshot() as Uint8Array;
+    const snap = engine.snapshot();
     const b64  = btoa(String.fromCharCode(...snap));
     localStorage.setItem(SNAPSHOT_KEY, b64);
   } catch { /* non-fatal */ }
@@ -35,17 +46,43 @@ function loadSnapshot(engine: Awaited<ReturnType<typeof getEngine>>) {
   } catch { /* non-fatal */ }
 }
 
+function loadQueue(): Uint8Array[] {
+  try {
+    const raw = localStorage.getItem(QUEUE_KEY);
+    if (!raw) return [];
+    return (JSON.parse(raw) as string[]).map(b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+  } catch { return []; }
+}
+
+function saveQueue(queue: Uint8Array[]) {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map(u => btoa(String.fromCharCode(...u)))));
+  } catch { /* storage full -- non-fatal */ }
+}
+
+function clearQueue() {
+  localStorage.removeItem(QUEUE_KEY);
+}
+
+function wasmTaskToTask(t: WasmTask): Task {
+  return { id: t.id, listId: t.list_id, content: t.content, isCompleted: t.is_completed, position: t.position, lastModified: t.last_modified };
+}
+
+function wasmListToList(l: WasmList): List {
+  return { id: l.id, name: l.name, lastModified: l.last_modified };
+}
+
 export function useVersaStore(auth: KimbuSession) {
-  const [state, setState] = useState<SyncState>({ connected: false, tasks: [], error: null });
+  const [state, setState]           = useState<SyncState>({ connected: false, tasks: [], lists: [], error: null });
   const [retryCount, setRetryCount] = useState(0);
-  const wsRef = useRef<WebSocket | null>(null);
-  const authRef = useRef(auth);
-  authRef.current = auth;
+  const wsRef      = useRef<WebSocket | null>(null);
+  const queueRef   = useRef<Uint8Array[]>(loadQueue());
+  const authRef    = useRef(auth);
+  const debounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  authRef.current  = auth;
 
   useEffect(() => {
     if (!auth.token) return;
-    console.log("[versa] effect run, token prefix:", auth.token.slice(0, 20), "retry:", retryCount);
-
     let cancelled = false;
 
     (async () => {
@@ -58,23 +95,25 @@ export function useVersaStore(auth: KimbuSession) {
       }
 
       loadSnapshot(engine);
-      const initial = (engine.get_tasks() as WasmTask[]).map(wasmTaskToTask);
-      if (!cancelled && initial.length > 0) setState(s => ({ ...s, tasks: initial }));
+      const initialTasks = engine.get_tasks().map(wasmTaskToTask);
+      const initialLists = engine.get_lists().map(wasmListToList);
+      if (!cancelled) setState(s => ({ ...s, tasks: initialTasks, lists: initialLists }));
 
       const clientID = stableClientID();
       const token    = authRef.current.token;
       if (!token) return;
-      const url      = `${RELAY_URL}?token=${encodeURIComponent(token)}`;
-      const ws       = new WebSocket(url);
+      const ws       = new WebSocket(`${RELAY_URL}?token=${encodeURIComponent(token)}`);
       ws.binaryType  = "arraybuffer";
       wsRef.current  = ws;
 
       ws.onopen = () => {
         if (cancelled) return;
         setState(s => ({ ...s, connected: true, error: null }));
-        const snap = new Uint8Array(engine.snapshot() as unknown as ArrayBuffer);
-        console.log("[versa] connected, sending snapshot bytes:", snap.length);
+        const snap = engine.snapshot();
         if (snap.length > 0) ws.send(buildFrame(clientID, snap));
+        const pending = queueRef.current.splice(0);
+        clearQueue();
+        for (const diff of pending) ws.send(buildFrame(clientID, diff));
       };
 
       ws.onerror = () => {
@@ -83,34 +122,28 @@ export function useVersaStore(auth: KimbuSession) {
 
       ws.onmessage = async (evt: MessageEvent) => {
         if (cancelled) return;
-
-        // Control frames are JSON text.
         if (typeof evt.data === "string") {
           try {
             const ctrl = JSON.parse(evt.data) as { type: string };
             if (ctrl.type === "token_expiring_soon") {
               const fresh = await authRef.current.refresh();
-              if (fresh && ws.readyState === WebSocket.OPEN) {
+              if (fresh && ws.readyState === WebSocket.OPEN)
                 ws.send(JSON.stringify({ type: "reauth", token: fresh }));
-              }
             }
           } catch { /* ignore malformed */ }
           return;
         }
-
-        const raw = new Uint8Array(evt.data as ArrayBuffer);
-        const payload = stripHeader(raw);
-        console.log("[versa] recv blob bytes:", raw.length, "payload bytes:", payload.length);
+        const payload = stripHeader(new Uint8Array(evt.data as ArrayBuffer));
         try {
           engine.merge_update(payload);
         } catch (e) {
           console.error("[versa] merge_update failed", e);
           return;
         }
-        const tasks = (engine.get_tasks() as WasmTask[]).map(wasmTaskToTask);
-        console.log("[versa] after merge, tasks:", tasks.length);
+        const tasks = engine.get_tasks().map(wasmTaskToTask);
+        const lists = engine.get_lists().map(wasmListToList);
         saveSnapshot(engine);
-        setState(s => ({ ...s, tasks }));
+        setState(s => ({ ...s, tasks, lists }));
       };
 
       const pingInterval = setInterval(() => {
@@ -120,7 +153,6 @@ export function useVersaStore(auth: KimbuSession) {
       ws.onclose = (evt) => {
         clearInterval(pingInterval);
         if (cancelled) return;
-        console.log("[versa] ws closed code:", evt.code, "reason:", evt.reason, "clean:", evt.wasClean);
         setState(s => ({ ...s, connected: false }));
         if (evt.code === 1008 || evt.code === 4001) {
           authRef.current.refresh();
@@ -136,70 +168,133 @@ export function useVersaStore(auth: KimbuSession) {
     };
   }, [auth.token, retryCount]);
 
-  const addTask = useCallback(async (content: string) => {
+  function sendDiff(diff: Uint8Array) {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(buildFrame(stableClientID(), diff));
+    } else {
+      queueRef.current.push(diff);
+      saveQueue(queueRef.current);
+    }
+  }
+
+  // Tasks
+
+  const addTask = useCallback(async (content: string, listId: string = "default") => {
     const engine = await getEngine();
-    const id  = crypto.randomUUID();
-    const ts  = Date.now();
-    const diff = new Uint8Array(engine.apply_task(id, content, false, ts) as unknown as ArrayBuffer);
+    const id       = crypto.randomUUID();
+    const position = Date.now();
+    const ts       = position;
+    const diff = engine.apply_task(id, listId, content, false, position, ts);
     saveSnapshot(engine);
-    setState(s => ({ ...s, tasks: [...s.tasks, { id, content, isCompleted: false, lastModified: ts }] }));
+    setState(s => ({ ...s, tasks: [...s.tasks, { id, listId, content, isCompleted: false, position, lastModified: ts }] }));
     sendDiff(diff);
   }, []);
 
-  const deleteTask = useCallback(async (id: string) => {
-    const engine = await getEngine();
-    const diff = new Uint8Array(engine.delete_task(id) as unknown as ArrayBuffer);
-    saveSnapshot(engine);
-    setState(s => ({ ...s, tasks: s.tasks.filter(t => t.id !== id) }));
-    sendDiff(diff);
+  const updateTask = useCallback(async (id: string, content: string) => {
+    setState(s => ({
+      ...s,
+      tasks: s.tasks.map(t => t.id === id ? { ...t, content, lastModified: Date.now() } : t),
+    }));
+
+    const existing = debounceRef.current.get(id);
+    if (existing) clearTimeout(existing);
+
+    debounceRef.current.set(id, setTimeout(async () => {
+      debounceRef.current.delete(id);
+      const engine = await getEngine();
+      setState(prev => {
+        const task = prev.tasks.find(t => t.id === id);
+        if (!task) return prev;
+        const ts   = Date.now();
+        const diff = engine.apply_task(id, task.listId, task.content, task.isCompleted, task.position, ts);
+        saveSnapshot(engine);
+        sendDiff(diff);
+        return { ...prev, tasks: prev.tasks.map(t => t.id === id ? { ...t, lastModified: ts } : t) };
+      });
+    }, DEBOUNCE_MS));
   }, []);
 
   const toggleTask = useCallback(async (id: string) => {
     const engine = await getEngine();
     setState(prev => {
-      const tasks = prev.tasks.map(t =>
-        t.id === id ? { ...t, isCompleted: !t.isCompleted, lastModified: Date.now() } : t
-      );
-      const updated = tasks.find(t => t.id === id)!;
-      (async () => {
-        const diff = new Uint8Array(
-          engine.apply_task(updated.id, updated.content, updated.isCompleted, updated.lastModified) as unknown as ArrayBuffer
-        );
-        saveSnapshot(engine);
-        sendDiff(diff);
-      })();
-      return { ...prev, tasks };
+      const task = prev.tasks.find(t => t.id === id);
+      if (!task) return prev;
+      const ts          = Date.now();
+      const isCompleted = !task.isCompleted;
+      const diff = engine.apply_task(id, task.listId, task.content, isCompleted, task.position, ts);
+      saveSnapshot(engine);
+      sendDiff(diff);
+      return { ...prev, tasks: prev.tasks.map(t => t.id === id ? { ...t, isCompleted, lastModified: ts } : t) };
     });
   }, []);
 
-  function sendDiff(diff: Uint8Array) {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(buildFrame(stableClientID(), diff));
-  }
+  const deleteTask = useCallback(async (id: string) => {
+    const engine = await getEngine();
+    const diff = engine.delete_task(id);
+    saveSnapshot(engine);
+    setState(s => ({ ...s, tasks: s.tasks.filter(t => t.id !== id) }));
+    sendDiff(diff);
+  }, []);
+
+  // Lists
+
+  const addList = useCallback(async (name: string) => {
+    const engine = await getEngine();
+    const id = crypto.randomUUID();
+    const ts = Date.now();
+    const diff = engine.apply_list(id, name, ts);
+    saveSnapshot(engine);
+    setState(s => ({ ...s, lists: [...s.lists, { id, name, lastModified: ts }] }));
+    sendDiff(diff);
+    return id;
+  }, []);
+
+  const renameList = useCallback(async (id: string, name: string) => {
+    const engine = await getEngine();
+    const ts   = Date.now();
+    const diff = engine.apply_list(id, name, ts);
+    saveSnapshot(engine);
+    setState(s => ({ ...s, lists: s.lists.map(l => l.id === id ? { ...l, name, lastModified: ts } : l) }));
+    sendDiff(diff);
+  }, []);
+
+  const deleteList = useCallback(async (id: string) => {
+    const engine = await getEngine();
+    const diff = engine.delete_list(id);
+    saveSnapshot(engine);
+    setState(s => ({
+      ...s,
+      lists: s.lists.filter(l => l.id !== id),
+      // Orphaned tasks move to default rather than being deleted.
+      tasks: s.tasks.map(t => t.listId === id ? { ...t, listId: "default" } : t),
+    }));
+    sendDiff(diff);
+  }, []);
 
   return {
-    tasks:     state.tasks,
-    connected: state.connected,
-    error:     state.error ?? auth.error,
+    tasks:      state.tasks,
+    lists:      state.lists,
+    connected:  state.connected,
+    error:      state.error ?? auth.error,
     authLoading: auth.loading,
     addTask,
+    updateTask,
     toggleTask,
     deleteTask,
+    addList,
+    renameList,
+    deleteList,
   };
 }
 
-// MARK: - Helpers
+// Helpers
 
 function stableClientID(): string {
   const key = "versa.client_id";
   let id = localStorage.getItem(key);
   if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
   return id;
-}
-
-function wasmTaskToTask(t: WasmTask): Task {
-  return { id: t.id, content: t.content, isCompleted: t.is_completed, lastModified: t.last_modified };
 }
 
 function buildFrame(clientID: string, payload: Uint8Array): ArrayBuffer {

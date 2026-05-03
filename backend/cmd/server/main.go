@@ -17,28 +17,30 @@ func main() {
 		port = "8080"
 	}
 
-	natsURL := os.Getenv("NATS_URL")
-	if natsURL == "" {
-		natsURL = nats.DefaultURL // nats://127.0.0.1:4222
+	// NATS is optional — omit NATS_URL to run single-node without it.
+	var nc *nats.Conn
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		var err error
+		nc, err = nats.Connect(natsURL,
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(2*time.Second),
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+				slog.Warn("nats disconnected", "err", err)
+			}),
+			nats.ReconnectHandler(func(_ *nats.Conn) {
+				slog.Info("nats reconnected")
+			}),
+		)
+		if err != nil {
+			slog.Error("nats connect failed", "url", natsURL, "err", err)
+			os.Exit(1)
+		}
+		defer nc.Drain()
+		slog.Info("nats connected", "url", natsURL)
+	} else {
+		slog.Info("nats disabled, running single-node")
 	}
-
-	nc, err := nats.Connect(natsURL,
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			slog.Warn("nats disconnected", "err", err)
-		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) {
-			slog.Info("nats reconnected")
-		}),
-	)
-	if err != nil {
-		slog.Error("nats connect failed", "url", natsURL, "err", err)
-		os.Exit(1)
-	}
-	defer nc.Drain()
-	slog.Info("nats connected", "url", natsURL)
 
 	hub := relay.NewHub(nc)
 

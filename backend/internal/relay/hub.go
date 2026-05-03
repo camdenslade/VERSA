@@ -23,8 +23,9 @@ type Hub struct {
 	nc *nats.Conn
 
 	mu      sync.RWMutex
-	clients map[string]*Client // key: clientID
-	subs    map[string]*nats.Subscription // key: room, one sub per room on this node
+	clients map[string]*Client              // key: clientID
+	subs    map[string]*nats.Subscription  // key: room, one sub per room on this node
+	buffers map[string]*RoomBuffer         // key: room, recent diffs for catch-up
 }
 
 func NewHub(nc *nats.Conn) *Hub {
@@ -32,31 +33,40 @@ func NewHub(nc *nats.Conn) *Hub {
 		nc:      nc,
 		clients: make(map[string]*Client),
 		subs:    make(map[string]*nats.Subscription),
+		buffers: make(map[string]*RoomBuffer),
 	}
 }
 
-// Register adds a client and ensures this node is subscribed to its room.
-func (h *Hub) Register(c *Client) {
+// Register adds a client, subscribes to its room if needed, and returns any
+// buffered frames so the caller can replay them to the new client for catch-up.
+func (h *Hub) Register(c *Client) [][]byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.clients[c.ID] = c
 	slog.Info("client connected", "id", c.ID, "room", c.Room, "total", len(h.clients))
 
-	if h.nc == nil || c.Room == "" {
-		return // local-only mode or empty room — rely on local broadcast
+	// Collect buffered frames before adding NATS subscription.
+	var buffered [][]byte
+	if buf, ok := h.buffers[c.Room]; ok {
+		buffered = buf.Snapshot()
 	}
-	if _, ok := h.subs[c.Room]; !ok {
-		room := c.Room
-		sub, err := h.nc.Subscribe(roomSubject(room), func(msg *nats.Msg) {
-			h.deliverToRoom(room, msg.Data)
-		})
-		if err != nil {
-			slog.Error("nats subscribe failed", "room", room, "err", err)
-			return
+
+	if h.nc != nil && c.Room != "" {
+		if _, ok := h.subs[c.Room]; !ok {
+			room := c.Room
+			sub, err := h.nc.Subscribe(roomSubject(room), func(msg *nats.Msg) {
+				h.deliverToRoom(room, msg.Data)
+			})
+			if err != nil {
+				slog.Error("nats subscribe failed", "room", room, "err", err)
+			} else {
+				h.subs[room] = sub
+			}
 		}
-		h.subs[room] = sub
 	}
+
+	return buffered
 }
 
 // Unregister removes a client and cleans up the room subscription if empty.
@@ -87,9 +97,11 @@ func (h *Hub) Unregister(c *Client) {
 	}
 }
 
-// Broadcast delivers data to all clients in the given room.
-// room is passed directly from ws.go (derived from JWT claims), so it's always correct.
+// Broadcast delivers data to all clients in the given room and buffers the frame
+// for late-joining clients.
 func (h *Hub) Broadcast(ctx context.Context, room string, data []byte) {
+	h.bufferFrame(room, data)
+
 	if h.nc != nil && room != "" {
 		if err := h.nc.Publish(roomSubject(room), data); err != nil {
 			slog.Error("nats publish failed", "room", room, "err", err)
@@ -98,6 +110,17 @@ func (h *Hub) Broadcast(ctx context.Context, room string, data []byte) {
 		return
 	}
 	h.deliverToRoom(room, data)
+}
+
+func (h *Hub) bufferFrame(room string, data []byte) {
+	h.mu.Lock()
+	buf, ok := h.buffers[room]
+	if !ok {
+		buf = &RoomBuffer{}
+		h.buffers[room] = buf
+	}
+	h.mu.Unlock()
+	buf.Push(data)
 }
 
 // deliverToRoom fans out a NATS message to local clients in a room,

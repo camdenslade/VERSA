@@ -63,8 +63,20 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 		}
 
 		c := &Client{ID: deviceID, Room: room, Send: make(chan []byte, 128)}
-		hub.Register(c)
+		buffered := hub.Register(c)
 		defer hub.Unregister(c)
+
+		// Replay buffered frames so the client catches up before live updates.
+		for _, frame := range buffered {
+			select {
+			case c.Send <- frame:
+			default:
+				slog.Warn("catch-up buffer full, dropping frame", "client", deviceID)
+			}
+		}
+		if len(buffered) > 0 {
+			slog.Info("replayed buffered frames", "client", deviceID, "count", len(buffered))
+		}
 
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
@@ -203,8 +215,15 @@ func handleUnauthenticated(w http.ResponseWriter, r *http.Request, hub *Hub) {
 	}
 
 	c := &Client{ID: deviceID, Room: room, Send: make(chan []byte, 128)}
-	hub.Register(c)
+	buffered := hub.Register(c)
 	defer hub.Unregister(c)
+
+	for _, frame := range buffered {
+		select {
+		case c.Send <- frame:
+		default:
+		}
+	}
 
 	ctx := r.Context()
 

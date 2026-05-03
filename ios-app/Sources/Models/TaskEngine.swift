@@ -7,6 +7,7 @@ final class TaskEngine {
 
     // MARK: - State
     private(set) var tasks:     [AppTask] = []
+    private(set) var lists:     [AppList] = []
     private(set) var syncState: SyncState = .disconnected
 
     // MARK: - Private
@@ -21,12 +22,12 @@ final class TaskEngine {
             try await KimbuAuth.shared.token()
         }
 
-        // Load persisted snapshot before connecting so UI is instant on launch.
         if let saved = Self.loadSnapshot() {
             let crdtRef = crdt
             do {
                 try crdtRef.mergeUpdate(bytes: saved)
                 tasks = crdtRef.getTasks().map(AppTask.init)
+                lists = crdtRef.getLists().map(AppList.init)
             } catch {
                 print("[VersaCore] snapshot load failed: \(error)")
             }
@@ -35,24 +36,32 @@ final class TaskEngine {
         Task { await self.connectAndListen() }
     }
 
-    // MARK: - Public mutations
+    // MARK: - Task mutations
 
-    func addTask(content: String) {
+    func addTask(content: String, listId: String = "default") {
         let task = AppTask(
             id:           UUID().uuidString,
+            listId:       listId,
             content:      content,
             isCompleted:  false,
             lastModified: Date().millisecondsSince1970
         )
         tasks.append(task)
-        sendToRust(task)
+        sendTaskToRust(task)
     }
 
     func toggleTask(_ id: String) {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[idx].isCompleted.toggle()
         tasks[idx].lastModified = Date().millisecondsSince1970
-        sendToRust(tasks[idx])
+        sendTaskToRust(tasks[idx])
+    }
+
+    func updateTask(_ id: String, content: String) {
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[idx].content      = content
+        tasks[idx].lastModified = Date().millisecondsSince1970
+        sendTaskToRust(tasks[idx])
     }
 
     func deleteTask(_ id: String) {
@@ -70,11 +79,50 @@ final class TaskEngine {
         }
     }
 
+    // MARK: - List mutations
+
+    func addList(name: String) -> String {
+        let id = UUID().uuidString
+        let list = AppList(id: id, name: name, lastModified: Date().millisecondsSince1970)
+        lists.append(list)
+        sendListToRust(list)
+        return id
+    }
+
+    func renameList(_ id: String, name: String) {
+        guard let idx = lists.firstIndex(where: { $0.id == id }) else { return }
+        lists[idx].name         = name
+        lists[idx].lastModified = Date().millisecondsSince1970
+        sendListToRust(lists[idx])
+    }
+
+    func deleteList(_ id: String) {
+        lists.removeAll { $0.id == id }
+        // Reassign orphaned tasks to default.
+        for idx in tasks.indices where tasks[idx].listId == id {
+            tasks[idx].listId       = "default"
+            tasks[idx].lastModified = Date().millisecondsSince1970
+            sendTaskToRust(tasks[idx])
+        }
+        let crdtRef   = crdt
+        let transport = transport
+        Task.detached(priority: .userInitiated) {
+            do {
+                let diff: Data = try crdtRef.deleteList(id: id)
+                Self.persistSnapshot(crdtRef.snapshot())
+                await transport.send(diff)
+            } catch {
+                print("[VersaCore] delete_list failed: \(error)")
+            }
+        }
+    }
+
     // MARK: - Private
 
-    private func sendToRust(_ task: AppTask) {
+    private func sendTaskToRust(_ task: AppTask) {
         let ffiTask = FfiTask(
             id:           task.id,
+            listId:       task.listId,
             content:      task.content,
             isCompleted:  task.isCompleted,
             lastModified: task.lastModified
@@ -92,6 +140,21 @@ final class TaskEngine {
         }
     }
 
+    private func sendListToRust(_ list: AppList) {
+        let ffiList = FfiList(id: list.id, name: list.name, lastModified: list.lastModified)
+        let crdtRef   = crdt
+        let transport = transport
+        Task.detached(priority: .userInitiated) {
+            do {
+                let diff: Data = try crdtRef.applyList(list: ffiList)
+                Self.persistSnapshot(crdtRef.snapshot())
+                await transport.send(diff)
+            } catch {
+                print("[VersaCore] apply_list failed: \(error)")
+            }
+        }
+    }
+
     private func connectAndListen() async {
         syncState = .connecting
         transport.connect()
@@ -99,7 +162,6 @@ final class TaskEngine {
             switch event {
             case .connected:
                 syncState = .connected
-                // Send full snapshot so peers get all our state immediately.
                 let crdtRef   = crdt
                 let transport = transport
                 Task.detached(priority: .userInitiated) {
@@ -108,29 +170,26 @@ final class TaskEngine {
 
             case .message(let data):
                 let payload = stripHeader(data)
-                print("[VersaCore] recv \(data.count) bytes, payload \(payload.count) bytes")
                 let crdtRef = crdt
-                let result: [AppTask]? = await Task.detached(priority: .userInitiated) {
+                let result: ([AppTask], [AppList])? = await Task.detached(priority: .userInitiated) {
                     do {
                         try crdtRef.mergeUpdate(bytes: payload)
                         let tasks = crdtRef.getTasks().map(AppTask.init)
-                        print("[VersaCore] after merge: \(tasks.count) tasks")
+                        let lists = crdtRef.getLists().map(AppList.init)
                         Self.persistSnapshot(crdtRef.snapshot())
-                        return tasks
+                        return (tasks, lists)
                     } catch {
                         print("[VersaCore] merge_update failed: \(error)")
                         return nil
                     }
                 }.value
-                if let result {
-                    tasks = result
+                if let (newTasks, newLists) = result {
+                    tasks = newTasks
+                    lists = newLists
                 }
 
             case .disconnected:
                 syncState = .disconnected
-                // On disconnect, invalidate cached token so the next openSocket()
-                // call forces a fresh login. This handles 401 / expired tokens
-                // transparently — RelayTransport will reconnect automatically.
                 await KimbuAuth.shared.invalidate()
             }
         }
@@ -186,24 +245,46 @@ final class TaskEngine {
 // MARK: - SyncState
 enum SyncState { case disconnected, connecting, connected }
 
-// MARK: - App model
+// MARK: - App models
+
 struct AppTask: Identifiable {
     var id:           String
+    var listId:       String
     var content:      String
     var isCompleted:  Bool
     var lastModified: Int64
 
     init(_ ffi: FfiTask) {
         id           = ffi.id
+        listId       = ffi.listId
         content      = ffi.content
         isCompleted  = ffi.isCompleted
         lastModified = ffi.lastModified
     }
 
-    init(id: String, content: String, isCompleted: Bool, lastModified: Int64) {
+    init(id: String, listId: String, content: String, isCompleted: Bool, lastModified: Int64) {
         self.id           = id
+        self.listId       = listId
         self.content      = content
         self.isCompleted  = isCompleted
+        self.lastModified = lastModified
+    }
+}
+
+struct AppList: Identifiable {
+    var id:           String
+    var name:         String
+    var lastModified: Int64
+
+    init(_ ffi: FfiList) {
+        id           = ffi.id
+        name         = ffi.name
+        lastModified = ffi.lastModified
+    }
+
+    init(id: String, name: String, lastModified: Int64) {
+        self.id           = id
+        self.name         = name
         self.lastModified = lastModified
     }
 }

@@ -13,10 +13,13 @@ actor RelayTransport {
     // Returns a fresh JWT each time; actor-isolated so await is needed.
     private let tokenProvider: @Sendable () async throws -> String
 
-    private var socket:       URLSessionWebSocketTask?
-    private var isConnecting: Bool = false
-    private var continuation: AsyncStream<RelayEvent>.Continuation?
+    private var socket:        URLSessionWebSocketTask?
+    private var isConnecting:  Bool = false
+    private var continuation:  AsyncStream<RelayEvent>.Continuation?
     private let session = URLSession(configuration: .default)
+
+    // Diffs produced while disconnected — flushed on next successful connect.
+    private var pendingQueue: [Data] = []
 
     let events: AsyncStream<RelayEvent>
 
@@ -37,12 +40,16 @@ actor RelayTransport {
     }
 
     func send(_ payload: Data) async {
-        guard let socket else { return }
+        guard let socket, socket.state == .running else {
+            pendingQueue.append(payload)
+            return
+        }
         let frame = wireFrame(payload)
         do {
             try await socket.send(.data(frame))
         } catch {
             print("[RelayTransport] send failed: \(error)")
+            pendingQueue.append(payload)
         }
     }
 
@@ -78,6 +85,18 @@ actor RelayTransport {
         task.resume()
         continuation?.yield(.connected)
         print("[RelayTransport] connected")
+
+        // Flush diffs that were queued while offline.
+        if !pendingQueue.isEmpty {
+            let queued = pendingQueue
+            pendingQueue.removeAll()
+            for payload in queued {
+                let frame = wireFrame(payload)
+                try? await task.send(.data(frame))
+            }
+            print("[RelayTransport] flushed \(queued.count) queued diff(s)")
+        }
+
         await readLoop(task)
     }
 
