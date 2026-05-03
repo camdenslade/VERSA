@@ -57,7 +57,7 @@ func main() {
 
 	hub := relay.NewHub(nc, store)
 
-	jwksURL   := os.Getenv("KIMBU_JWKS_URL")
+	jwksURL := os.Getenv("KIMBU_JWKS_URL")
 	jwtSecret := os.Getenv("JWT_SECRET")
 	var validator *auth.Validator
 	if jwksURL != "" || jwtSecret != "" {
@@ -67,6 +67,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync", relay.Handler(hub, validator))
 	mux.HandleFunc("/bench", relay.BenchHandler())
+	mux.HandleFunc("/pentest", relay.PentestHandler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
