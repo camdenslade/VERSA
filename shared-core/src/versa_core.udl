@@ -1,6 +1,4 @@
-namespace versa_core {
-    string reverse_string(string input);
-};
+namespace versa_core {};
 
 [Error]
 interface FfiError {
@@ -12,6 +10,7 @@ dictionary FfiTask {
     string  list_id;
     string  content;
     boolean is_completed;
+    i64     position;
     i64     last_modified;
 };
 

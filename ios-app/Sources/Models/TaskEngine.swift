@@ -39,12 +39,14 @@ final class TaskEngine {
     // MARK: - Task mutations
 
     func addTask(content: String, listId: String = "default") {
+        let ts = Date().millisecondsSince1970
         let task = AppTask(
             id:           UUID().uuidString,
             listId:       listId,
             content:      content,
             isCompleted:  false,
-            lastModified: Date().millisecondsSince1970
+            position:     ts,
+            lastModified: ts
         )
         tasks.append(task)
         sendTaskToRust(task)
@@ -125,6 +127,7 @@ final class TaskEngine {
             listId:       task.listId,
             content:      task.content,
             isCompleted:  task.isCompleted,
+            position:     task.position,
             lastModified: task.lastModified
         )
         let crdtRef   = crdt
@@ -252,6 +255,7 @@ struct AppTask: Identifiable {
     var listId:       String
     var content:      String
     var isCompleted:  Bool
+    var position:     Int64
     var lastModified: Int64
 
     init(_ ffi: FfiTask) {
@@ -259,14 +263,16 @@ struct AppTask: Identifiable {
         listId       = ffi.listId
         content      = ffi.content
         isCompleted  = ffi.isCompleted
+        position     = ffi.position
         lastModified = ffi.lastModified
     }
 
-    init(id: String, listId: String, content: String, isCompleted: Bool, lastModified: Int64) {
+    init(id: String, listId: String, content: String, isCompleted: Bool, position: Int64, lastModified: Int64) {
         self.id           = id
         self.listId       = listId
         self.content      = content
         self.isCompleted  = isCompleted
+        self.position     = position
         self.lastModified = lastModified
     }
 }
