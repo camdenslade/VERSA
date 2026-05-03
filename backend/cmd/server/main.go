@@ -66,6 +66,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync", relay.Handler(hub, validator))
+	mux.HandleFunc("/bench", relay.BenchHandler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
