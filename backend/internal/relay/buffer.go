@@ -13,7 +13,9 @@ const (
 type RoomBuffer struct {
 	mu     sync.Mutex
 	frames [][]byte
-	total  int // bytes currently held
+	total  int    // bytes currently held
+	room   string
+	store  *Store
 }
 
 func (b *RoomBuffer) Push(frame []byte) {
@@ -27,6 +29,10 @@ func (b *RoomBuffer) Push(frame []byte) {
 	for (len(b.frames) > bufferMaxFrames || b.total > bufferMaxBytes) && len(b.frames) > 0 {
 		b.total -= len(b.frames[0])
 		b.frames = b.frames[1:]
+	}
+
+	if b.store != nil {
+		b.store.AppendFrame(b.room, frame)
 	}
 }
 

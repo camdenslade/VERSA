@@ -42,7 +42,20 @@ func main() {
 		slog.Info("nats disabled, running single-node")
 	}
 
-	hub := relay.NewHub(nc)
+	dbPath := os.Getenv("RELAY_DB_PATH")
+	if dbPath == "" {
+		dbPath = "/opt/versa/relay.db"
+	}
+	var store *relay.Store
+	if s, err := relay.OpenStore(dbPath); err != nil {
+		slog.Warn("relay store unavailable, running without persistence", "err", err)
+	} else {
+		store = s
+		defer store.Close()
+		slog.Info("relay store opened", "path", dbPath)
+	}
+
+	hub := relay.NewHub(nc, store)
 
 	jwksURL   := os.Getenv("KIMBU_JWKS_URL")
 	jwtSecret := os.Getenv("JWT_SECRET")

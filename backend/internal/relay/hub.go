@@ -20,20 +20,44 @@ type Client struct {
 // Each relay node is stateless with respect to other nodes — NATS is the
 // shared backplane.
 type Hub struct {
-	nc *nats.Conn
+	nc    *nats.Conn
+	store *Store
 
 	mu      sync.RWMutex
-	clients map[string]*Client              // key: clientID
-	subs    map[string]*nats.Subscription  // key: room, one sub per room on this node
-	buffers map[string]*RoomBuffer         // key: room, recent diffs for catch-up
+	clients map[string]*Client
+	subs    map[string]*nats.Subscription
+	buffers map[string]*RoomBuffer
 }
 
-func NewHub(nc *nats.Conn) *Hub {
-	return &Hub{
+func NewHub(nc *nats.Conn, store *Store) *Hub {
+	h := &Hub{
 		nc:      nc,
+		store:   store,
 		clients: make(map[string]*Client),
 		subs:    make(map[string]*nats.Subscription),
 		buffers: make(map[string]*RoomBuffer),
+	}
+	if store != nil {
+		h.restoreFromStore()
+	}
+	return h
+}
+
+// restoreFromStore repopulates in-memory buffers from persisted frames so
+// clients that connect after a relay restart can still catch up.
+func (h *Hub) restoreFromStore() {
+	for _, room := range h.store.Rooms() {
+		frames := h.store.LoadFrames(room)
+		if len(frames) == 0 {
+			continue
+		}
+		buf := &RoomBuffer{room: room, store: h.store}
+		for _, f := range frames {
+			buf.frames = append(buf.frames, f)
+			buf.total += len(f)
+		}
+		h.buffers[room] = buf
+		slog.Info("restored room from store", "room", room, "frames", len(frames))
 	}
 }
 
@@ -116,7 +140,7 @@ func (h *Hub) bufferFrame(room string, data []byte) {
 	h.mu.Lock()
 	buf, ok := h.buffers[room]
 	if !ok {
-		buf = &RoomBuffer{}
+		buf = &RoomBuffer{room: room, store: h.store}
 		h.buffers[room] = buf
 	}
 	h.mu.Unlock()
