@@ -25,7 +25,7 @@ Conflicts are resolved by the CRDT -- two devices editing the same field concurr
 
 ## Benchmark
 
-Measured against the live relay at `versa.cslade.space`. Numbers from a 50-round run with a 512B payload:
+VERSA latency is measured end-to-end against the live relay at `versa.cslade.space` -- delta sent, received by a second connected client -- over a 50-round run with a 512B payload. GraphQL and REST numbers are modeled from the same measured RTT using architectural constants (GraphQL adds an 8ms server resolver round-trip and always broadcasts the full object; REST uses average staleness at a 500ms poll interval).
 
 | | VERSA | GraphQL subscriptions | REST polling |
 |---|---|---|---|
@@ -35,9 +35,7 @@ Measured against the live relay at `versa.cslade.space`. Numbers from a 50-round
 | **Bandwidth (50 rounds)** | 25.8 KB | 66.5 KB | 60.2 KB |
 | **Conflict resolution** | Automatic | Last-write-wins (data loss) | 409 + retry loop |
 
-GraphQL subscription latency includes the server resolver round-trip (~8ms) required to re-fetch and broadcast the full object on every mutation. REST latency is average staleness at a 500ms poll interval. VERSA latency is end-to-end: delta sent to relay, received by a second connected client.
-
-Run it yourself: [versa.cslade.space/bench](https://versa.cslade.space/bench)
+Run it yourself (includes the modeling methodology): [versa.cslade.space/bench](https://versa.cslade.space/bench)
 
 ---
 

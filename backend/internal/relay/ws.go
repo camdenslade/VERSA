@@ -89,23 +89,46 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 			warnAfter = 0
 		}
 
+		// reauthCh signals the expiry goroutine to reset its timer when the
+		// client successfully reauthenticates.
+		reauthCh := make(chan time.Duration, 1)
+
 		go func() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(warnAfter):
-				// Send warning — client should call /v1/auth/refresh and send reauth
+			warn := warnAfter
+			grace := reAuthWarningBefore
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ttl := <-reauthCh:
+					// Client reauthenticated -- reset timers based on new TTL.
+					warn = ttl - reAuthWarningBefore
+					if warn < 0 {
+						warn = 0
+					}
+					grace = reAuthWarningBefore
+					continue
+				case <-time.After(warn):
+				}
 				msg, _ := json.Marshal(controlMsg{Type: "token_expiring_soon"})
 				_ = conn.Write(ctx, websocket.MessageText, msg)
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reAuthWarningBefore):
-				slog.Info("token expired, closing connection", "client", deviceID)
-				conn.Close(websocket.StatusPolicyViolation, "token expired")
-				cancel()
+				select {
+				case <-ctx.Done():
+					return
+				case ttl := <-reauthCh:
+					warn = ttl - reAuthWarningBefore
+					if warn < 0 {
+						warn = 0
+					}
+					grace = reAuthWarningBefore
+					_ = grace
+					continue
+				case <-time.After(grace):
+					slog.Info("token expired, closing connection", "client", deviceID)
+					conn.Close(websocket.StatusPolicyViolation, "token expired")
+					cancel()
+					return
+				}
 			}
 		}()
 
@@ -125,9 +148,6 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 				}
 			}
 		}()
-
-		currentClaims := claims
-		_ = currentClaims
 
 		for {
 			msgType, r, err := conn.Reader(ctx)
@@ -152,10 +172,11 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 						conn.Close(websocket.StatusPolicyViolation, "reauth failed")
 						return
 					}
-					// Reset the expiry timer by restarting (simplest: close and let client reconnect)
-					// For now, accept the new claims and extend the session.
-					currentClaims = newClaims
 					slog.Info("reauth accepted", "client", deviceID, "new_exp", newClaims.ExpiresAt)
+					select {
+					case reauthCh <- auth.TimeUntilExpiry(newClaims):
+					default:
+					}
 					ack, _ := json.Marshal(controlMsg{Type: "reauth_ok"})
 					_ = conn.Write(ctx, websocket.MessageText, ack)
 				}

@@ -56,6 +56,11 @@ func (h *Hub) restoreFromStore() {
 			buf.frames = append(buf.frames, f)
 			buf.total += len(f)
 		}
+		// Trim restored frames to stay within byte limit.
+		for buf.total > bufferMaxBytes && len(buf.frames) > 0 {
+			buf.total -= len(buf.frames[0])
+			buf.frames = buf.frames[1:]
+		}
 		h.buffers[room] = buf
 		slog.Info("restored room from store", "room", room, "frames", len(frames))
 	}

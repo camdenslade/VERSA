@@ -21,6 +21,9 @@ actor RelayTransport {
     // Diffs produced while disconnected — flushed on next successful connect.
     private var pendingQueue: [Data] = []
 
+    // Queued diffs waiting to be flushed after relay catch-up; nil once flushed.
+    private var catchUpFlush: [Data]? = nil
+
     let events: AsyncStream<RelayEvent>
 
     init(url: URL, clientID: String, tokenProvider: @escaping @Sendable () async throws -> String) {
@@ -86,24 +89,37 @@ actor RelayTransport {
         continuation?.yield(.connected)
         print("[RelayTransport] connected")
 
-        // Flush diffs that were queued while offline.
+        // Snapshot and clear the offline queue. Flush happens after the first
+        // inbound frame so local diffs land on top of relay catch-up state.
+        // A 200ms fallback timer fires if the relay has no buffered frames.
         if !pendingQueue.isEmpty {
-            let queued = pendingQueue
+            catchUpFlush = pendingQueue
             pendingQueue.removeAll()
-            for payload in queued {
-                let frame = wireFrame(payload)
-                try? await task.send(.data(frame))
+            Task {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                await self.drainCatchUpFlush(task: task)
             }
-            print("[RelayTransport] flushed \(queued.count) queued diff(s)")
         }
 
         await readLoop(task)
+    }
+
+    private func drainCatchUpFlush(task: URLSessionWebSocketTask) async {
+        guard let queued = catchUpFlush else { return }
+        catchUpFlush = nil
+        for payload in queued {
+            try? await task.send(.data(wireFrame(payload)))
+        }
+        if !queued.isEmpty {
+            print("[RelayTransport] flushed \(queued.count) queued diff(s) (timer)")
+        }
     }
 
     private func readLoop(_ task: URLSessionWebSocketTask) async {
         while true {
             do {
                 let msg = try await task.receive()
+
                 switch msg {
                 case .data(let data):
                     continuation?.yield(.message(data))
@@ -114,9 +130,22 @@ actor RelayTransport {
                 @unknown default:
                     break
                 }
+
+                // Flush offline queue after first inbound frame so we are
+                // up to date before broadcasting our offline edits.
+                if let queued = catchUpFlush {
+                    catchUpFlush = nil
+                    for payload in queued {
+                        try? await task.send(.data(wireFrame(payload)))
+                    }
+                    if !queued.isEmpty {
+                        print("[RelayTransport] flushed \(queued.count) queued diff(s)")
+                    }
+                }
             } catch {
                 print("[RelayTransport] disconnected: \(error.localizedDescription)")
                 socket = nil
+                catchUpFlush = nil
                 continuation?.yield(.disconnected)
                 isConnecting = false
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -138,8 +167,9 @@ actor RelayTransport {
             print("[RelayTransport] token expiring — refreshing")
             do {
                 let fresh = try await tokenProvider()
-                let reauth = "{\"type\":\"reauth\",\"token\":\"\(fresh)\"}"
-                try await task.send(.string(reauth))
+                let reauth = try JSONSerialization.data(
+                    withJSONObject: ["type": "reauth", "token": fresh])
+                try await task.send(.string(String(decoding: reauth, as: UTF8.self)))
                 print("[RelayTransport] reauth sent")
             } catch {
                 print("[RelayTransport] reauth failed: \(error)")
