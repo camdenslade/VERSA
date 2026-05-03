@@ -5,73 +5,29 @@ on:
     branches: [main]
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::390402548152:role/kimbu-github-actions
-          aws-region: us-east-1
-
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+      - name: Build relay binary
+        working-directory: backend
         run: |
-          docker buildx create --use
-          docker buildx build \
-            --platform linux/amd64 \
-            --cache-from type=registry,ref=$ECR_REGISTRY/versa-relay:cache \
-            --cache-to type=registry,ref=$ECR_REGISTRY/versa-relay:cache,mode=max \
-            -t $ECR_REGISTRY/versa-relay:$IMAGE_TAG \
-            -t $ECR_REGISTRY/versa-relay:latest \
-            --push \
-            .
+          GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/server
 
-      - name: Deploy to ECS
+      - name: Deploy to EC2
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          SSH_KEY: ${{ secrets.VERSA_SSH_KEY }}
         run: |
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition versa-relay \
-            --query 'taskDefinition' \
-            --output json | \
-            python3 -c "
-          import sys, json
-          d = json.load(sys.stdin)
-          for k in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
-              d.pop(k, None)
-          for c in d['containerDefinitions']:
-              c['image'] = '$ECR_REGISTRY/versa-relay:$IMAGE_TAG'
-          print(json.dumps(d))
-          ")
-
-          NEW_ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$TASK_DEF" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          aws ecs update-service \
-            --cluster kimbu \
-            --service versa-relay \
-            --task-definition $NEW_ARN \
-            --force-new-deployment
-
-          aws ecs wait services-stable \
-            --cluster kimbu \
-            --services versa-relay
+          echo "$SSH_KEY" > key.pem
+          chmod 600 key.pem
+          scp -i key.pem -o StrictHostKeyChecking=no backend/relay ec2-user@3.215.112.0:/opt/versa/versa-relay-new
+          ssh -i key.pem -o StrictHostKeyChecking=no ec2-user@3.215.112.0 "
+            mv /opt/versa/versa-relay-new /opt/versa/versa-relay &&
+            chmod +x /opt/versa/versa-relay &&
+            pm2 restart versa-relay
+          "
+          rm key.pem
