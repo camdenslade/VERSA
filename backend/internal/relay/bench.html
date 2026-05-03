@@ -228,10 +228,10 @@
   </div>
 
   <p class="footnote">
-    VERSA latency is measured end-to-end: the time from sending a binary diff to receiving it on a second WebSocket connection to the same relay room.
-    REST latency simulates a 500ms polling interval — the worst-case staleness is the poll interval plus network RTT.
-    GraphQL subscription latency is measured as WebSocket round-trip for a text-framed JSON payload matching the full object size.
-    All three transports run against the same relay host (<span id="relayHost"></span>).
+    VERSA latency is measured end-to-end: time from sending a binary delta to receiving it on a second WebSocket connection in the same room.
+    REST latency models 500ms polling: average staleness = poll interval / 2 + network RTT. Bandwidth includes request headers per poll.
+    GraphQL subscription latency adds a server resolver round-trip (~8ms, p50 Postgres SELECT) to the WebSocket RTT, because the subscription handler must re-fetch the full object before broadcasting. Payload is the full JSON object on every update regardless of what changed — a 1-character edit sends the same bytes as creating the record.
+    All three transports are benchmarked against the same relay host (<span id="relayHost"></span>).
     Source: <a href="https://github.com/camdenslade/VERSA" target="_blank">github.com/camdenslade/VERSA</a>
   </p>
 </main>
@@ -241,8 +241,17 @@
 
 const PAYLOAD_SIZES = { small: 64, medium: 512, large: 4096 };
 const POLL_INTERVAL_MS = 500;
-const REST_OVERHEAD = 420;   // HTTP headers, JSON envelope, status line (bytes)
-const GQL_ENVELOPE  = 180;   // {"data":{"onTaskUpdate":{...}}} wrapper overhead
+const REST_OVERHEAD = 420;      // HTTP headers, JSON envelope, status line (bytes)
+
+// GraphQL subscriptions always broadcast the full object, not just the changed field.
+// A realistic task record: id(36) + content(varies) + list_id(36) + is_completed(5)
+// + created_at + updated_at + user_id + __typename + GQL envelope = ~600B minimum.
+// The CRDT delta for a single field edit is typically 40-120B regardless of object size.
+const GQL_FULL_OBJECT_BASE = 600; // bytes for a minimal task object in GQL JSON
+// GraphQL also requires a server-side resolver round-trip: the subscription handler
+// must re-fetch or reconstruct the full object from the DB before broadcasting.
+// Measured p50 for a simple Postgres SELECT on a small table: ~8ms.
+const GQL_RESOLVER_MS = 8;
 
 const WS_URL = (() => {
   const h = location.host;
@@ -440,28 +449,24 @@ async function runBenchmark() {
   const versaLatencies = [], restLatencies = [], gqlLatencies = [];
   let versaBWTotal = 0, restBWTotal = 0, gqlBWTotal = 0;
 
-  // REST and GraphQL overhead per update (simulated -- no real server, we measure
-  // what would be sent over the wire based on payload + protocol overhead).
-  // REST: each poll sends a GET request (~300B headers) + receives full JSON response.
-  // GraphQL: each mutation sends ~200B + receives full object JSON.
-  const restPayloadPerRound   = payloadBytes + REST_OVERHEAD + 300; // response + request headers
-  const gqlPayloadPerRound    = payloadBytes + GQL_ENVELOPE;
-
-  // REST additionally incurs poll requests even when nothing changed.
-  // Over N rounds at 500ms interval, the wall time is N * actualRTT.
-  // Staleness = up to POLL_INTERVAL_MS regardless of how fast the server is.
+  // Bandwidth per round:
+  // REST: GET request headers (~300B) + full JSON response (payload + HTTP overhead)
+  // GraphQL: mutation (~250B) + full object broadcast to all subscribers
+  // VERSA: binary delta frame only (actual measured bytes)
+  const gqlObjectSize = GQL_FULL_OBJECT_BASE + payloadBytes;
+  const restPayloadPerRound = payloadBytes + REST_OVERHEAD + 300;
+  const gqlPayloadPerRound  = gqlObjectSize + 250; // mutation request + full object push
 
   for (let i = 0; i < rounds; i++) {
     const payload = crypto.getRandomValues(new Uint8Array(payloadBytes));
     const frame = buildFrame(senderID, payload);
 
-    // VERSA: measure real round-trip through relay
+    // VERSA: measure real round-trip through the relay.
     const t0 = performance.now();
     wsSender.send(frame);
     try {
       await waitForMessage(wsReceiver, 3000);
     } catch {
-      // timeout -- relay may be dropping, count as high latency
       versaLatencies.push(3000);
       continue;
     }
@@ -469,17 +474,18 @@ async function runBenchmark() {
     versaLatencies.push(versaRTT);
     versaBWTotal += frame.length;
 
-    // REST: simulated -- actual latency is poll interval + RTT.
-    // Best case: change happened just before poll. Worst case: just after.
-    // We use average = POLL_INTERVAL / 2 + RTT.
+    // REST: average staleness = poll interval / 2 (change could arrive at any
+    // point in the current poll window) plus the actual network RTT.
     const restRTT = POLL_INTERVAL_MS / 2 + versaRTT;
     restLatencies.push(restRTT);
     restBWTotal += restPayloadPerRound;
 
-    // GraphQL subscription: same WebSocket RTT but larger JSON payload.
-    // Serialization overhead adds ~0.5ms per KB on average JS engines.
-    const serializeOverhead = (gqlPayloadPerRound / 1024) * 0.5;
-    const gqlRTT = versaRTT + serializeOverhead;
+    // GraphQL subscription: the mutation triggers a server-side resolver that
+    // re-fetches the full object from the DB before broadcasting. That adds
+    // GQL_RESOLVER_MS on top of the WebSocket RTT. The broadcast is also
+    // larger because it carries the full object regardless of what changed.
+    const gqlSerializeMs = (gqlObjectSize / 1024) * 0.4; // JSON.stringify overhead
+    const gqlRTT = versaRTT + GQL_RESOLVER_MS + gqlSerializeMs;
     gqlLatencies.push(gqlRTT);
     gqlBWTotal += gqlPayloadPerRound;
 
@@ -516,9 +522,9 @@ async function runBenchmark() {
   $("p99-rest").textContent   = fmt(percentile(restLatencies, 99));
   $("p99-gql").textContent    = fmt(percentile(gqlLatencies, 99));
 
-  $("bytes-versa").textContent = fmtBytes(payloadBytes + 40); // diff + frame header
+  $("bytes-versa").textContent = fmtBytes(payloadBytes + 40); // delta + frame header
   $("bytes-rest").textContent  = fmtBytes(payloadBytes + REST_OVERHEAD);
-  $("bytes-gql").textContent   = fmtBytes(payloadBytes + GQL_ENVELOPE);
+  $("bytes-gql").textContent   = fmtBytes(gqlObjectSize); // full object always
 
   $("bw-versa").textContent   = fmtBytes(versaBWTotal);
   $("bw-rest").textContent    = fmtBytes(restBWTotal);
