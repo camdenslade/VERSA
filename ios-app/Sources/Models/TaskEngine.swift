@@ -25,7 +25,7 @@ final class TaskEngine {
         if let saved = Self.loadSnapshot() {
             let crdtRef = crdt
             do {
-                try crdtRef.mergeUpdate(bytes: [UInt8](saved))
+                try crdtRef.mergeUpdate(bytes: saved)
                 tasks = crdtRef.getTasks().map(AppTask.init)
                 lists = crdtRef.getLists().map(AppList.init)
             } catch {
@@ -72,8 +72,8 @@ final class TaskEngine {
         let transport = transport
         Task.detached(priority: .userInitiated) {
             do {
-                let diff = Data(try crdtRef.deleteTask(id: id))
-                Self.persistSnapshot(Data(crdtRef.snapshot()))
+                let diff = try crdtRef.deleteTask(id: id)
+                Self.persistSnapshot(crdtRef.snapshot())
                 await transport.send(diff)
             } catch {
                 print("[VersaCore] delete_task failed: \(error)")
@@ -110,8 +110,8 @@ final class TaskEngine {
         let transport = transport
         Task.detached(priority: .userInitiated) {
             do {
-                let diff = Data(try crdtRef.deleteList(id: id))
-                Self.persistSnapshot(Data(crdtRef.snapshot()))
+                let diff = try crdtRef.deleteList(id: id)
+                Self.persistSnapshot(crdtRef.snapshot())
                 await transport.send(diff)
             } catch {
                 print("[VersaCore] delete_list failed: \(error)")
@@ -134,8 +134,8 @@ final class TaskEngine {
         let transport = transport
         Task.detached(priority: .userInitiated) {
             do {
-                let diff = Data(try crdtRef.applyTask(task: ffiTask))
-                Self.persistSnapshot(Data(crdtRef.snapshot()))
+                let diff = try crdtRef.applyTask(task: ffiTask)
+                Self.persistSnapshot(crdtRef.snapshot())
                 await transport.send(diff)
             } catch {
                 print("[VersaCore] apply_task failed: \(error)")
@@ -149,8 +149,8 @@ final class TaskEngine {
         let transport = transport
         Task.detached(priority: .userInitiated) {
             do {
-                let diff = Data(try crdtRef.applyList(list: ffiList))
-                Self.persistSnapshot(Data(crdtRef.snapshot()))
+                let diff = try crdtRef.applyList(list: ffiList)
+                Self.persistSnapshot(crdtRef.snapshot())
                 await transport.send(diff)
             } catch {
                 print("[VersaCore] apply_list failed: \(error)")
@@ -168,7 +168,7 @@ final class TaskEngine {
                 let crdtRef   = crdt
                 let transport = transport
                 Task.detached(priority: .userInitiated) {
-                    await transport.send(Data(crdtRef.snapshot()))
+                    await transport.send(crdtRef.snapshot())
                 }
 
             case .message(let data):
@@ -176,10 +176,10 @@ final class TaskEngine {
                 let crdtRef = crdt
                 let result: ([AppTask], [AppList])? = await Task.detached(priority: .userInitiated) {
                     do {
-                        try crdtRef.mergeUpdate(bytes: [UInt8](payload))
+                        try crdtRef.mergeUpdate(bytes: payload)
                         let tasks = crdtRef.getTasks().map(AppTask.init)
                         let lists = crdtRef.getLists().map(AppList.init)
-                        Self.persistSnapshot(Data(crdtRef.snapshot()))
+                        Self.persistSnapshot(crdtRef.snapshot())
                         return (tasks, lists)
                     } catch {
                         print("[VersaCore] merge_update failed: \(error)")

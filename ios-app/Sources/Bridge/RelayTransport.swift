@@ -83,11 +83,13 @@ actor RelayTransport {
             components.host = "127.0.0.1"
         }
 
-        let task = session.webSocketTask(with: components.url!)
+        let wsURL = components.url!
+        print("[RelayTransport] connecting to \(wsURL.host ?? "?"):\(wsURL.port ?? 0)\(wsURL.path)")
+        let task = session.webSocketTask(with: wsURL)
         socket = task
         task.resume()
         continuation?.yield(.connected)
-        print("[RelayTransport] connected")
+        print("[RelayTransport] socket resumed")
 
         // Snapshot and clear the offline queue. Flush happens after the first
         // inbound frame so local diffs land on top of relay catch-up state.
@@ -143,7 +145,7 @@ actor RelayTransport {
                     }
                 }
             } catch {
-                print("[RelayTransport] disconnected: \(error.localizedDescription)")
+                print("[RelayTransport] disconnected: \(error) (\(error.localizedDescription))")
                 socket = nil
                 catchUpFlush = nil
                 continuation?.yield(.disconnected)
