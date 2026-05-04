@@ -28,4 +28,5 @@ web-app/dist/
 # Misc
 .DS_Store
 .env
+.env.local
 versa-kimbu.pem

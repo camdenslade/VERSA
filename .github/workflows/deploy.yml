@@ -17,15 +17,31 @@ jobs:
         working-directory: backend
         run: GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/server
 
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        working-directory: shared-core
+        run: wasm-pack build --target web --features wasm --out-dir ../web-app/src/wasm/pkg
+
+      - name: Build web app
+        working-directory: web-app
+        env:
+          VITE_RELAY_URL: wss://versa.cslade.space:443/sync
+          VITE_KIMBU_URL: https://api.kimbu.cslade.space/v1/auth
+          VITE_KIMBU_APP_ID: versa
+        run: npm ci && npm run build
+
       - name: Deploy to EC2
         env:
           SSH_KEY: ${{ secrets.VERSA_SSH_KEY }}
         run: |
           echo "$SSH_KEY" > key.pem
           chmod 600 key.pem
+
+          # Deploy relay binary
           scp -i key.pem -o StrictHostKeyChecking=no backend/relay ec2-user@3.215.112.0:/opt/versa/versa-relay-new
           ssh -i key.pem -o StrictHostKeyChecking=no ec2-user@3.215.112.0 "
-            mkdir -p /opt/versa &&
             mv /opt/versa/versa-relay-new /opt/versa/versa-relay &&
             chmod +x /opt/versa/versa-relay &&
             pm2 restart versa-relay &&
@@ -33,4 +49,16 @@ jobs:
             pm2 logs versa-relay --lines 20 --nostream &&
             curl -sf http://localhost:8080/healthz || exit 1
           "
+
+          # Deploy web app static files
+          ssh -i key.pem -o StrictHostKeyChecking=no ec2-user@3.215.112.0 "sudo mkdir -p /var/www/versa && sudo chown ec2-user:ec2-user /var/www/versa"
+          scp -i key.pem -o StrictHostKeyChecking=no -r web-app/dist/* ec2-user@3.215.112.0:/var/www/versa/
+
+          # Update nginx config (replaces versa-kimbu.conf to add static file serving at /)
+          scp -i key.pem -o StrictHostKeyChecking=no web-app/nginx-versa-web.conf ec2-user@3.215.112.0:/tmp/versa-kimbu.conf
+          ssh -i key.pem -o StrictHostKeyChecking=no ec2-user@3.215.112.0 "
+            sudo mv /tmp/versa-kimbu.conf /etc/nginx/conf.d/versa-kimbu.conf &&
+            sudo nginx -t && sudo systemctl reload nginx
+          "
+
           rm key.pem

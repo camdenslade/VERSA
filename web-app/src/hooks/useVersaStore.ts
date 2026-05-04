@@ -75,11 +75,14 @@ function wasmListToList(l: WasmList): List {
 export function useVersaStore(auth: KimbuSession) {
   const [state, setState]           = useState<SyncState>({ connected: false, tasks: [], lists: [], error: null });
   const [retryCount, setRetryCount] = useState(0);
-  const wsRef      = useRef<WebSocket | null>(null);
-  const queueRef   = useRef<Uint8Array[]>(loadQueue());
-  const authRef    = useRef(auth);
+  const wsRef       = useRef<WebSocket | null>(null);
+  const queueRef    = useRef<Uint8Array[]>(loadQueue());
+  const authRef     = useRef(auth);
   const debounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  authRef.current  = auth;
+  // Track whether we already refreshed for this retry cycle so we don't
+  // hammer the auth server on every reconnect attempt.
+  const didRefreshRef = useRef(false);
+  authRef.current   = auth;
 
   useEffect(() => {
     if (!auth.token) return;
@@ -101,7 +104,10 @@ export function useVersaStore(auth: KimbuSession) {
 
       const clientID = stableClientID();
       let token = authRef.current.token;
-      if (retryCount > 0) {
+      // Only refresh once per reconnect cycle (not on every exponential-backoff
+      // retry). didRefreshRef resets to false whenever retryCount resets to 0.
+      if (retryCount > 0 && !didRefreshRef.current) {
+        didRefreshRef.current = true;
         try {
           const fresh = await authRef.current.refresh();
           if (fresh) token = fresh;
@@ -116,6 +122,8 @@ export function useVersaStore(auth: KimbuSession) {
       ws.onopen = () => {
         if (cancelled) return;
         console.log("[versa] connected");
+        didRefreshRef.current = false;
+        setRetryCount(0);
         setState(s => ({ ...s, connected: true, error: null }));
         const snap = engine.snapshot();
         if (snap.length > 0) ws.send(buildFrame(clientID, snap));
@@ -164,11 +172,18 @@ export function useVersaStore(auth: KimbuSession) {
         console.warn(`[versa] disconnected code=${evt.code} reason="${evt.reason}" wasClean=${evt.wasClean}`);
         if (cancelled) return;
         setState(s => ({ ...s, connected: false }));
-        if (evt.code === 1008 || evt.code === 4001) {
-          authRef.current.refresh();
-        } else {
-          setTimeout(() => { if (!cancelled) setRetryCount(n => n + 1); }, 2000);
+        if (evt.code === 1000 || evt.code === 1001) {
+          // Clean close — don't retry.
+          return;
         }
+        if (evt.code === 1008 || evt.code === 4001) {
+          // Auth rejection — force a refresh on the next attempt.
+          didRefreshRef.current = false;
+        }
+        // Exponential backoff: 2s, 4s, 8s, … capped at 30s.
+        const backoff = Math.min(2000 * Math.pow(2, retryCount), 30_000);
+        console.log(`[versa] retrying in ${backoff}ms (attempt ${retryCount + 1})`);
+        setTimeout(() => { if (!cancelled) setRetryCount(n => n + 1); }, backoff);
       };
     })();
 
