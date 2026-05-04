@@ -4,11 +4,11 @@ let defaultList = AppList(id: "default", name: "Tasks", lastModified: 0)
 
 struct ContentView: View {
     @Environment(TaskEngine.self) private var engine
-    @State private var selectedListId: String = "default"
+    @State private var selectedListId: String? = "default"
     @State private var editingListId:  String? = nil
 
     private var allLists: [AppList] { [defaultList] + engine.lists }
-    private var selectedList: AppList { allLists.first { $0.id == selectedListId } ?? defaultList }
+    private var selectedList: AppList { allLists.first { $0.id == selectedListId ?? "" } ?? defaultList }
 
     var body: some View {
         NavigationSplitView {
@@ -30,7 +30,7 @@ struct ContentView: View {
             )
             .navigationTitle("Lists")
         } detail: {
-            TaskDetail(listId: selectedListId, listName: selectedList.name)
+            TaskDetail(listId: selectedListId ?? "default", listName: selectedList.name)
         }
     }
 }
@@ -39,7 +39,7 @@ struct ContentView: View {
 
 struct ListSidebar: View {
     let lists:          [AppList]
-    @Binding var selectedListId: String
+    @Binding var selectedListId: String?
     @Binding var editingListId:  String?
     let taskCount:  (String) -> Int
     let onAdd:      () -> Void

@@ -1,6 +1,7 @@
 // Shared data types — no FFI annotations here.
 // Both the UniFFI and WASM layers derive from these.
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Task {
     pub id:            String,
@@ -11,6 +12,7 @@ pub struct Task {
     pub last_modified: i64, // epoch ms
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct List {
     pub id:            String,

@@ -2,17 +2,15 @@ use std::sync::Mutex;
 use loro::{ExportMode, LoroDoc, LoroValue};
 use crate::types::{List, Task, VersaError};
 
+#[allow(dead_code)]
 pub struct CrdtEngine {
-    doc:       Mutex<LoroDoc>,
-    client_id: String,
+    doc: Mutex<LoroDoc>,
 }
 
+#[allow(dead_code)]
 impl CrdtEngine {
-    pub fn new(client_id: String) -> Self {
-        Self {
-            doc:       Mutex::new(LoroDoc::new()),
-            client_id,
-        }
+    pub fn new(_client_id: String) -> Self {
+        Self { doc: Mutex::new(LoroDoc::new()) }
     }
 
     /// Apply a local task mutation.
@@ -159,7 +157,4 @@ impl CrdtEngine {
         lists
     }
 
-    pub fn client_id(&self) -> &str {
-        &self.client_id
-    }
 }
