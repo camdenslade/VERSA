@@ -8,9 +8,10 @@ export async function getEngine(): Promise<WasmVersaEngine> {
   if (_initPromise) return _initPromise;
 
   _initPromise = (async () => {
-    const { VersaEngine } = await import("./pkg/versa_core");
+    const mod = await import("./pkg/versa_core");
+    await mod.default();
     const clientID = getOrCreateClientID();
-    _engine = new VersaEngine(clientID);
+    _engine = new mod.VersaEngine(clientID);
     return _engine;
   })();
 
