@@ -15,8 +15,7 @@ jobs:
 
       - name: Build relay binary
         working-directory: backend
-        run: |
-          GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/server
+        run: GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/server
 
       - name: Deploy to EC2
         env:
@@ -24,14 +23,45 @@ jobs:
         run: |
           echo "$SSH_KEY" > key.pem
           chmod 600 key.pem
+
+          python3 -c "
+          import textwrap
+          print(textwrap.dedent('''
+          server {
+              listen 80;
+              server_name versa.cslade.space;
+              return 301 https://\$host\$request_uri;
+          }
+          server {
+              listen 443 ssl;
+              server_name versa.cslade.space;
+              ssl_certificate     /etc/letsencrypt/live/versa.cslade.space/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/versa.cslade.space/privkey.pem;
+              location / {
+                  proxy_pass http://127.0.0.1:8080;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection upgrade;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_read_timeout 3600s;
+                  proxy_send_timeout 3600s;
+              }
+          }
+          ''').strip())" > /tmp/versa.conf
+
           scp -i key.pem -o StrictHostKeyChecking=no backend/relay ec2-user@3.215.112.0:/opt/versa/versa-relay-new
+          scp -i key.pem -o StrictHostKeyChecking=no /tmp/versa.conf ec2-user@3.215.112.0:/tmp/versa.conf
+
           ssh -i key.pem -o StrictHostKeyChecking=no ec2-user@3.215.112.0 "
+            mkdir -p /opt/versa &&
             mv /opt/versa/versa-relay-new /opt/versa/versa-relay &&
             chmod +x /opt/versa/versa-relay &&
-            mkdir -p /opt/versa &&
+            sudo mv /tmp/versa.conf /etc/nginx/conf.d/versa.conf &&
+            sudo nginx -t && sudo systemctl reload nginx &&
             pm2 restart versa-relay &&
             sleep 3 &&
-            pm2 show versa-relay | grep -E 'status|restarts' &&
-            curl -sf http://localhost:8080/healthz || (pm2 logs versa-relay --lines 20 --nostream && exit 1)
+            pm2 logs versa-relay --lines 20 --nostream &&
+            curl -sf http://localhost:8080/healthz || exit 1
           "
           rm key.pem
