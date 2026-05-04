@@ -100,14 +100,22 @@ export function useVersaStore(auth: KimbuSession) {
       if (!cancelled) setState(s => ({ ...s, tasks: initialTasks, lists: initialLists }));
 
       const clientID = stableClientID();
-      const token    = authRef.current.token;
+      let token = authRef.current.token;
+      if (retryCount > 0) {
+        try {
+          const fresh = await authRef.current.refresh();
+          if (fresh) token = fresh;
+        } catch { /* use existing token */ }
+      }
       if (!token) return;
+      console.log(`[versa] connecting to ${RELAY_URL} (retry ${retryCount})`);
       const ws       = new WebSocket(`${RELAY_URL}?token=${encodeURIComponent(token)}`);
       ws.binaryType  = "arraybuffer";
       wsRef.current  = ws;
 
       ws.onopen = () => {
         if (cancelled) return;
+        console.log("[versa] connected");
         setState(s => ({ ...s, connected: true, error: null }));
         const snap = engine.snapshot();
         if (snap.length > 0) ws.send(buildFrame(clientID, snap));
@@ -116,7 +124,8 @@ export function useVersaStore(auth: KimbuSession) {
         for (const diff of pending) ws.send(buildFrame(clientID, diff));
       };
 
-      ws.onerror = () => {
+      ws.onerror = (e) => {
+        console.error("[versa] WebSocket error", e);
         if (!cancelled) setState(s => ({ ...s, error: "WebSocket error" }));
       };
 
@@ -152,6 +161,7 @@ export function useVersaStore(auth: KimbuSession) {
 
       ws.onclose = (evt) => {
         clearInterval(pingInterval);
+        console.warn(`[versa] disconnected code=${evt.code} reason="${evt.reason}" wasClean=${evt.wasClean}`);
         if (cancelled) return;
         setState(s => ({ ...s, connected: false }));
         if (evt.code === 1008 || evt.code === 4001) {
