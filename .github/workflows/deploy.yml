@@ -17,12 +17,37 @@ jobs:
         working-directory: backend
         run: GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build -ldflags="-s -w" -o relay ./cmd/server
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Cache wasm-bindgen-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-0.2.118
+
+      - name: Install wasm-bindgen-cli
+        run: |
+          if ! command -v wasm-bindgen &>/dev/null; then
+            cargo install wasm-bindgen-cli --version 0.2.118 --locked
+          fi
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: shared-core/target
+          key: rust-wasm-${{ hashFiles('shared-core/Cargo.lock') }}
+          restore-keys: rust-wasm-
 
       - name: Build WASM
         working-directory: shared-core
-        run: wasm-pack build --target web --features wasm --out-dir ../web-app/src/wasm/pkg
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --lib --release --target wasm32-unknown-unknown --features wasm
+          mkdir -p ../web-app/src/wasm/pkg
+          wasm-bindgen \
+            --target web \
+            --out-dir ../web-app/src/wasm/pkg \
+            target/wasm32-unknown-unknown/release/versa_core.wasm
+          echo '{"type":"module","name":"versa-core","version":"0.1.0"}' \
+            > ../web-app/src/wasm/pkg/package.json
 
       - name: Build web app
         working-directory: web-app

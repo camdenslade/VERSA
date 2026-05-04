@@ -229,11 +229,11 @@ final class TaskEngine {
     }
 
     static func relayURL() -> URL {
-        let info   = Bundle.main.infoDictionary!
-        let host   = info["RELAY_HOST"] as? String ?? "127.0.0.1"
-        let port   = info["RELAY_PORT"] as? String ?? "8080"
+        let info   = Bundle.main.infoDictionary ?? [:]
+        let host   = (info["RELAY_HOST"] as? String).flatMap { $0.hasPrefix("$") ? nil : $0 } ?? "versa.cslade.space"
+        let port   = (info["RELAY_PORT"] as? String).flatMap { $0.hasPrefix("$") ? nil : $0 } ?? "443"
         let scheme = (port == "443") ? "wss" : "ws"
-        return URL(string: "\(scheme)://\(host):\(port)/sync")!
+        return URL(string: "\(scheme)://\(host):\(port)/sync") ?? URL(string: "wss://versa.cslade.space:443/sync")!
     }
 
     static func stableClientID() -> String {

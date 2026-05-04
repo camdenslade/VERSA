@@ -1,6 +1,5 @@
 // Debug config — used for simulator and local device builds.
-// Change RELAY_HOST to your Mac's LAN IP when running on a physical device.
-// Simulator: 127.0.0.1
-// Physical device: run `ipconfig getifaddr en0` on your Mac
-RELAY_HOST = 127.0.0.1
-RELAY_PORT = 8080
+// Points at the prod relay so physical device builds work without a local server.
+// To run against a local relay: set RELAY_HOST = <your Mac LAN IP>, RELAY_PORT = 8080
+RELAY_HOST = versa.cslade.space
+RELAY_PORT = 443
