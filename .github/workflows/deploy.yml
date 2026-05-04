@@ -28,6 +28,10 @@ jobs:
           ssh -i key.pem -o StrictHostKeyChecking=no ec2-user@3.215.112.0 "
             mv /opt/versa/versa-relay-new /opt/versa/versa-relay &&
             chmod +x /opt/versa/versa-relay &&
-            pm2 restart versa-relay
+            mkdir -p /opt/versa &&
+            pm2 restart versa-relay &&
+            sleep 3 &&
+            pm2 show versa-relay | grep -E 'status|restarts' &&
+            curl -sf http://localhost:8080/healthz || (pm2 logs versa-relay --lines 20 --nostream && exit 1)
           "
           rm key.pem
