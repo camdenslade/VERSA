@@ -28,12 +28,16 @@ func Handler(hub *Hub, validator *auth.Validator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := r.URL.Query().Get("token")
 		if tokenStr == "" {
-			// Fallback: allow bare client_id for local dev (no validator configured)
 			if validator == nil {
 				handleUnauthenticated(w, r, hub)
 				return
 			}
 			http.Error(w, "token required", http.StatusUnauthorized)
+			return
+		}
+
+		if validator == nil {
+			handleUnauthenticated(w, r, hub)
 			return
 		}
 
